@@ -505,20 +505,15 @@ class YoutubeDlpManager:
             opts["js_runtimes"] = js_runtimes
 
         if avoid_android_vr:
-            # Some yt-dlp releases use android_vr as the *only* default client
-            # when no external JavaScript runtime is available. Excluding it
-            # from ``default`` alone can therefore remove every requested
-            # client and raise "No player clients have been requested".
-            #
-            # web_embedded is yt-dlp's own compatibility fallback for several
-            # android_vr failures. Add it explicitly before excluding
-            # android_vr so this retry always has a concrete alternate client
-            # on yt-dlp versions where android_vr is the sole default. The
-            # normal first attempt still uses untouched yt-dlp defaults.
+            # Compatibility retry only. Keep the normal/known-good path above
+            # completely untouched. On yt-dlp 2026.08.x a client chain that
+            # mixes ``default`` with web_embedded can still resolve an
+            # ANDROID_VR media URL, while excluding android_vr from ``default``
+            # can leave no requested clients when Home Assistant has no JS
+            # runtime. Request web_embedded *alone* on this 403 retry so yt-dlp
+            # cannot fall back to the rejected android_vr route.
             opts["extractor_args"] = {
-                "youtube": {
-                    "player_client": ["default", "web_embedded", "-android_vr"]
-                }
+                "youtube": {"player_client": ["web_embedded"]}
             }
 
         if request.media_type == MEDIA_TYPE_AUDIO:
