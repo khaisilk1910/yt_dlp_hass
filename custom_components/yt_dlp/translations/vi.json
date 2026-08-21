@@ -2,8 +2,7 @@
   "title": "YouTube-DLP",
   "config": {
     "abort": {
-      "already_configured": "Integration đã được cấu hình. Chỉ hỗ trợ một cấu hình YouTube-DLP.",
-      "reconfigure_successful": "Đã cập nhật thư mục tải xuống và thư viện nhạc."
+      "already_configured": "Integration đã được cấu hình. Chỉ hỗ trợ một cấu hình YouTube-DLP."
     },
     "error": {
       "cannot_create_folder": "Không thể tạo thư mục tải xuống hoặc thư mục không có quyền ghi."
@@ -20,17 +19,6 @@
           "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất.",
           "media_library_path": "Thư mục sẽ quét để phát file nhạc cục bộ. Để trống khi cấu hình lần đầu để dùng cùng thư mục tải xuống."
         }
-      },
-      "reconfigure": {
-        "title": "Đổi thư mục tải xuống",
-        "data": {
-          "file_path": "Thư mục tải xuống",
-          "media_library_path": "Thư mục thư viện nhạc"
-        },
-        "data_description": {
-          "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất.",
-          "media_library_path": "Thư mục sẽ quét để phát file nhạc cục bộ. Mặc định dùng cùng thư mục tải xuống."
-        }
       }
     }
   },
@@ -38,13 +26,26 @@
     "error": {
       "mobile_action_required": "Hãy chọn thiết bị Companion App trước khi bật thông báo lên điện thoại.",
       "mobile_action_unavailable": "Thiết bị thông báo đã chọn hiện không còn được đăng ký. Hãy mở lại màn hình này và chọn một thiết bị đang khả dụng.",
-      "zalo_fields_required": "Thông báo Zalo cần nhập đủ Thread ID và Zalo account."
+      "zalo_fields_required": "Thông báo Zalo cần nhập đủ Thread ID và Zalo account.",
+      "cannot_create_folder": "Không thể tạo thư mục tải xuống hoặc thư mục không có quyền ghi."
     },
     "step": {
       "init": {
-        "title": "Thông báo khi tải xong",
-        "description": "Chọn nơi YouTube-DLP gửi thông báo sau khi tải file thành công. Việc gửi thông báo tách biệt với job tải, vì vậy thiết bị/kênh thông báo không khả dụng sẽ không làm một file đã tải thành công bị chuyển sang trạng thái lỗi.",
+        "title": "Cài đặt YouTube-DLP",
+        "description": "Quản lý thư mục tải xuống/thư viện nhạc và nơi nhận thông báo sau khi tải thành công. Chỉ khi thay đổi thư mục thì riêng tích hợp này mới được reload; thay đổi thông báo được áp dụng ngay mà không cần reload.",
         "sections": {
+          "folders": {
+            "name": "Thư mục media",
+            "description": "Thiết lập nơi lưu file tải xuống và thư mục mà thư viện nhạc trên dashboard sẽ quét.",
+            "data": {
+              "file_path": "Thư mục tải xuống",
+              "media_library_path": "Thư mục thư viện nhạc"
+            },
+            "data_description": {
+              "file_path": "Đường dẫn tuyệt đối có quyền ghi dùng để lưu file audio/video đã tải xong.",
+              "media_library_path": "Thư mục được quét để phát nhạc cục bộ. Có thể dùng cùng thư mục tải xuống."
+            }
+          },
           "notify_home_assistant": {
             "name": "Home Assistant",
             "description": "Gửi thông báo thường trực trong Home Assistant bằng notify.persistent_notification; tự dùng persistent_notification.create làm phương án tương thích nếu cần.",

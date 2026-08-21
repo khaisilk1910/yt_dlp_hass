@@ -23,14 +23,15 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_MEDIA_LIBRARY_PATH,
     CONF_MOBILE_NOTIFY_ACTION,
     CONF_NOTIFY_ENABLED,
     CONF_ZALO_ACCOUNT,
     CONF_ZALO_THREAD_ID,
     CONF_ZALO_TYPE,
-    CONF_MEDIA_LIBRARY_PATH,
     DEFAULT_NOTIFY_ENABLED,
     DOMAIN,
+    SECTION_FOLDERS,
     SECTION_NOTIFY_HOME_ASSISTANT,
     SECTION_NOTIFY_MOBILE,
     SECTION_NOTIFY_ZALO,
@@ -52,27 +53,27 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlowHandler:
-        """Return the notification options flow."""
+        """Return the unified settings options flow."""
         return OptionsFlowHandler()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Configure the media download folder."""
+        """Configure the initial media download and library folders."""
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
                 path = await self.hass.async_add_executor_job(
                     ensure_writable_directory, user_input[CONF_FILE_PATH]
                 )
+                library_path = normalize_download_directory(
+                    str(user_input.get(CONF_MEDIA_LIBRARY_PATH) or path)
+                )
             except (OSError, ValueError):
                 errors["base"] = "cannot_create_folder"
             else:
                 await self.async_set_unique_id(f"{DOMAIN}.downloader")
                 self._abort_if_unique_id_configured()
-                library_path = normalize_download_directory(
-                    str(user_input.get(CONF_MEDIA_LIBRARY_PATH) or path)
-                )
                 return self.async_create_entry(
                     title="YouTube-DLP",
                     data={
@@ -92,69 +93,55 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_reconfigure(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Change the media download folder."""
-        entry = self._get_reconfigure_entry()
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            try:
-                path = await self.hass.async_add_executor_job(
-                    ensure_writable_directory, user_input[CONF_FILE_PATH]
-                )
-            except (OSError, ValueError):
-                errors["base"] = "cannot_create_folder"
-            else:
-                await self.async_set_unique_id(f"{DOMAIN}.downloader")
-                self._abort_if_unique_id_mismatch()
-                library_path = normalize_download_directory(
-                    str(user_input.get(CONF_MEDIA_LIBRARY_PATH) or path)
-                )
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data_updates={
-                        CONF_FILE_PATH: path,
-                        CONF_MEDIA_LIBRARY_PATH: library_path,
-                    },
-                )
-
-        return self.async_show_form(
-            step_id="reconfigure",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_FILE_PATH,
-                        default=entry.data[CONF_FILE_PATH],
-                    ): str,
-                    vol.Optional(
-                        CONF_MEDIA_LIBRARY_PATH,
-                        default=entry.data.get(
-                            CONF_MEDIA_LIBRARY_PATH, entry.data[CONF_FILE_PATH]
-                        ),
-                    ): str,
-                }
-            ),
-            errors=errors,
-        )
-
 
 class OptionsFlowHandler(OptionsFlow):
-    """Configure completion notifications without reloading the integration."""
+    """Configure folders and completion notifications in one settings screen."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Manage notification targets and enable switches."""
+        """Manage folders, notification targets and enable switches."""
         errors: dict[str, str] = {}
         available_mobile_actions = mobile_notify_actions(self.hass)
 
         if user_input is not None:
+            folders_cfg = _option_section(user_input, SECTION_FOLDERS)
+            download_path: str | None = None
+            library_path: str | None = None
+            current_download = normalize_download_directory(
+                self.config_entry.data[CONF_FILE_PATH]
+            )
+            current_library = normalize_download_directory(
+                self.config_entry.data.get(CONF_MEDIA_LIBRARY_PATH, current_download)
+            )
+            try:
+                requested_download = normalize_download_directory(
+                    str(
+                        folders_cfg.get(CONF_FILE_PATH)
+                        or self.config_entry.data[CONF_FILE_PATH]
+                    )
+                )
+                # Do not touch the filesystem for notification-only saves. A
+                # writability check runs in an executor only when the download
+                # folder itself was changed by the user.
+                if requested_download != current_download:
+                    download_path = await self.hass.async_add_executor_job(
+                        ensure_writable_directory, requested_download
+                    )
+                else:
+                    download_path = current_download
+
+                library_path = normalize_download_directory(
+                    str(folders_cfg.get(CONF_MEDIA_LIBRARY_PATH) or download_path)
+                )
+            except (OSError, ValueError):
+                errors["base"] = "cannot_create_folder"
+
             normalized = self._normalize_options(user_input)
             mobile_cfg = normalized[SECTION_NOTIFY_MOBILE]
             zalo_cfg = normalized[SECTION_NOTIFY_ZALO]
 
-            if mobile_cfg[CONF_NOTIFY_ENABLED]:
+            if not errors and mobile_cfg[CONF_NOTIFY_ENABLED]:
                 mobile_action = mobile_cfg[CONF_MOBILE_NOTIFY_ACTION]
                 if not mobile_action:
                     errors["base"] = "mobile_action_required"
@@ -166,11 +153,36 @@ class OptionsFlowHandler(OptionsFlow):
                     errors["base"] = "zalo_fields_required"
 
             if not errors:
-                # The running manager reads entry.options when a download completes,
-                # so saving notification settings does not need an integration reload.
-                return self.async_create_entry(title="", data=normalized)
+                assert download_path is not None
+                assert library_path is not None
 
-            user_input = normalized
+                folders_changed = (
+                    download_path != current_download
+                    or library_path != current_library
+                )
+
+                if folders_changed:
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry,
+                        data={
+                            **self.config_entry.data,
+                            CONF_FILE_PATH: download_path,
+                            CONF_MEDIA_LIBRARY_PATH: library_path,
+                        },
+                    )
+
+                # Notification settings remain in ConfigEntry.options so the
+                # existing download manager can read them without any changes.
+                result = self.async_create_entry(title="", data=normalized)
+
+                # Folder paths are consumed when the manager/playback manager is
+                # constructed. Reload only when a folder actually changed; pure
+                # notification edits remain reload-free.
+                if folders_changed:
+                    await self.hass.config_entries.async_reload(
+                        self.config_entry.entry_id
+                    )
+                return result
 
         return self.async_show_form(
             step_id="init",
@@ -183,11 +195,31 @@ class OptionsFlowHandler(OptionsFlow):
         user_input: dict[str, Any] | None,
         available_mobile_actions: list[str],
     ) -> vol.Schema:
-        """Build the form from current options and live mobile notify actions."""
+        """Build the unified form from entry data, options and live notify actions."""
         values = user_input or dict(self.config_entry.options)
         home_cfg = _option_section(values, SECTION_NOTIFY_HOME_ASSISTANT)
         mobile_cfg = _option_section(values, SECTION_NOTIFY_MOBILE)
         zalo_cfg = _option_section(values, SECTION_NOTIFY_ZALO)
+
+        if user_input is not None:
+            folders_cfg = _option_section(user_input, SECTION_FOLDERS)
+            download_default = str(
+                folders_cfg.get(CONF_FILE_PATH)
+                or self.config_entry.data[CONF_FILE_PATH]
+            )
+            library_default = str(
+                folders_cfg.get(CONF_MEDIA_LIBRARY_PATH)
+                or self.config_entry.data.get(
+                    CONF_MEDIA_LIBRARY_PATH, download_default
+                )
+            )
+        else:
+            download_default = str(self.config_entry.data[CONF_FILE_PATH])
+            library_default = str(
+                self.config_entry.data.get(
+                    CONF_MEDIA_LIBRARY_PATH, download_default
+                )
+            )
 
         selected_mobile = str(mobile_cfg.get(CONF_MOBILE_NOTIFY_ACTION) or "")
         mobile_options = [
@@ -225,6 +257,21 @@ class OptionsFlowHandler(OptionsFlow):
 
         return vol.Schema(
             {
+                vol.Required(SECTION_FOLDERS): section(
+                    vol.Schema(
+                        {
+                            vol.Required(
+                                CONF_FILE_PATH,
+                                default=download_default,
+                            ): _TEXT_SELECTOR,
+                            vol.Required(
+                                CONF_MEDIA_LIBRARY_PATH,
+                                default=library_default,
+                            ): _TEXT_SELECTOR,
+                        }
+                    ),
+                    {"collapsed": False},
+                ),
                 vol.Required(SECTION_NOTIFY_HOME_ASSISTANT): section(
                     vol.Schema(
                         {
@@ -296,7 +343,7 @@ class OptionsFlowHandler(OptionsFlow):
 
     @staticmethod
     def _normalize_options(user_input: dict[str, Any]) -> dict[str, Any]:
-        """Normalize nested form data while preserving IDs as exact strings."""
+        """Normalize notification data while folder paths stay in ConfigEntry.data."""
         home_cfg = _option_section(user_input, SECTION_NOTIFY_HOME_ASSISTANT)
         mobile_cfg = _option_section(user_input, SECTION_NOTIFY_MOBILE)
         zalo_cfg = _option_section(user_input, SECTION_NOTIFY_ZALO)

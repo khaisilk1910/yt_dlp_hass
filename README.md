@@ -76,20 +76,20 @@ Người dùng tự chịu trách nhiệm về cách sử dụng tích hợp và
 
 ## Direct playback and dashboard media card
 
-Version 0.4.1 includes direct audio playback and the dashboard media card without
+Version 0.4.2 includes direct audio playback and the dashboard media card without
 changing the existing download worker. The integration bundles and automatically
 registers the Lovelace custom card `custom:yt-dlp-media-card`.
 
 The card provides a media-player selector, YouTube URL playback, play/pause,
 stop, previous/next, seek, volume/mute, a searchable local music library, and a
-**Download** tab that exposes the same options as `yt_dlp.download`: media type,
+**Download** top-level view alongside **Media Player**, exposing the same options as `yt_dlp.download`: media type,
 video quality/format, audio format/quality, overwrite, and wait-for-completion.
 The card tracks only a download started from the card, shows progress while that
 job is active, and displays an in-card completion/error notification. The active
 job id is persisted in the browser so tracking can resume after navigating away
 and back. Audio completion also refreshes the library cache.
 
-The library folder is configured separately and defaults to the download folder.
+Download and music-library folders are available from the integration settings (the same gear/options screen as download notifications), so changing paths no longer requires the three-dot Reconfigure flow. The library folder defaults to the download folder.
 Filesystem scanning is performed only when requested by the UI/action and runs in
 Home Assistant's executor with a short cache; it is not scanned during startup.
 

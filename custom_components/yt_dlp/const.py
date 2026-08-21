@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 
@@ -58,6 +58,7 @@ RESPONSE_METADATA_TIMEOUT = 15
 
 # Options-flow notification settings. They intentionally live in ConfigEntry.options
 # because they change runtime behavior but are not required to set up the integration.
+SECTION_FOLDERS = "folders"
 SECTION_NOTIFY_HOME_ASSISTANT = "notify_home_assistant"
 SECTION_NOTIFY_MOBILE = "notify_mobile"
 SECTION_NOTIFY_ZALO = "notify_zalo"

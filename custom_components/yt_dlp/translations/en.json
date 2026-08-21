@@ -2,8 +2,7 @@
   "title": "YouTube-DLP",
   "config": {
     "abort": {
-      "already_configured": "Already configured. Only one YouTube-DLP configuration is supported.",
-      "reconfigure_successful": "Download and music library folders updated."
+      "already_configured": "Already configured. Only one YouTube-DLP configuration is supported."
     },
     "error": {
       "cannot_create_folder": "The download folder cannot be created or is not writable."
@@ -20,17 +19,6 @@
           "file_path": "Absolute path where completed audio/video files are stored.",
           "media_library_path": "Folder scanned for local audio playback. Leave empty to use the download folder."
         }
-      },
-      "reconfigure": {
-        "title": "Change download folder",
-        "data": {
-          "file_path": "Download folder",
-          "media_library_path": "Music library folder"
-        },
-        "data_description": {
-          "file_path": "Absolute path where completed audio/video files are stored.",
-          "media_library_path": "Folder scanned for local audio playback. Defaults to the download folder."
-        }
       }
     }
   },
@@ -38,13 +26,26 @@
     "error": {
       "mobile_action_required": "Enable a mobile notification only after selecting a Companion App notification target.",
       "mobile_action_unavailable": "The selected mobile notification target is no longer registered. Reopen this screen and select an available device.",
-      "zalo_fields_required": "Zalo notifications require both Thread ID and Zalo account."
+      "zalo_fields_required": "Zalo notifications require both Thread ID and Zalo account.",
+      "cannot_create_folder": "The download folder cannot be created or is not writable."
     },
     "step": {
       "init": {
-        "title": "Download notifications",
-        "description": "Choose where YouTube-DLP sends a message after a download finishes successfully. Notification delivery is separate from the download job, so an unavailable notification target will not change a completed download into a failure.",
+        "title": "YouTube-DLP settings",
+        "description": "Manage download/library folders and choose where YouTube-DLP sends a message after a download finishes successfully. Folder changes reload only this integration; notification-only changes are applied without a reload.",
         "sections": {
+          "folders": {
+            "name": "Media folders",
+            "description": "Configure where downloads are stored and which folder the dashboard media library scans.",
+            "data": {
+              "file_path": "Download folder",
+              "media_library_path": "Music library folder"
+            },
+            "data_description": {
+              "file_path": "Absolute writable path where completed audio/video files are stored.",
+              "media_library_path": "Folder scanned for local audio playback. It can be the same as the download folder."
+            }
+          },
           "notify_home_assistant": {
             "name": "Home Assistant",
             "description": "Send a persistent notification in Home Assistant using notify.persistent_notification (with persistent_notification.create as a compatibility fallback).",
