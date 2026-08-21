@@ -18,6 +18,12 @@
     },
     "search": {
       "service": "mdi:magnify"
+    },
+    "play": {
+      "service": "mdi:cast-audio"
+    },
+    "scan_library": {
+      "service": "mdi:folder-music"
     }
   }
 }

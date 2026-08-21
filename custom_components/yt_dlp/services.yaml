@@ -160,3 +160,25 @@ search:
           max: 50
           step: 1
           mode: box
+
+play:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+          type: url
+    media_player:
+      required: true
+      selector:
+        entity:
+          domain: media_player
+          multiple: false
+
+scan_library:
+  fields:
+    force:
+      default: false
+      selector:
+        boolean:
+

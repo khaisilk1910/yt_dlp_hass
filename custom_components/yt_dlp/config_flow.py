@@ -28,6 +28,7 @@ from .const import (
     CONF_ZALO_ACCOUNT,
     CONF_ZALO_THREAD_ID,
     CONF_ZALO_TYPE,
+    CONF_MEDIA_LIBRARY_PATH,
     DEFAULT_NOTIFY_ENABLED,
     DOMAIN,
     SECTION_NOTIFY_HOME_ASSISTANT,
@@ -36,7 +37,7 @@ from .const import (
     ZALO_TYPE_USER,
     ZALO_TYPES,
 )
-from .helpers import ensure_writable_directory
+from .helpers import ensure_writable_directory, normalize_download_directory
 from .notifications import mobile_notify_action_label, mobile_notify_actions
 
 _BOOLEAN_SELECTOR = BooleanSelector()
@@ -69,14 +70,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(f"{DOMAIN}.downloader")
                 self._abort_if_unique_id_configured()
+                library_path = normalize_download_directory(
+                    str(user_input.get(CONF_MEDIA_LIBRARY_PATH) or path)
+                )
                 return self.async_create_entry(
                     title="YouTube-DLP",
-                    data={CONF_FILE_PATH: path},
+                    data={
+                        CONF_FILE_PATH: path,
+                        CONF_MEDIA_LIBRARY_PATH: library_path,
+                    },
                 )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_FILE_PATH): str}),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_FILE_PATH): str,
+                    vol.Optional(CONF_MEDIA_LIBRARY_PATH, default=""): str,
+                }
+            ),
             errors=errors,
         )
 
@@ -96,9 +108,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(f"{DOMAIN}.downloader")
                 self._abort_if_unique_id_mismatch()
+                library_path = normalize_download_directory(
+                    str(user_input.get(CONF_MEDIA_LIBRARY_PATH) or path)
+                )
                 return self.async_update_reload_and_abort(
                     entry,
-                    data_updates={CONF_FILE_PATH: path},
+                    data_updates={
+                        CONF_FILE_PATH: path,
+                        CONF_MEDIA_LIBRARY_PATH: library_path,
+                    },
                 )
 
         return self.async_show_form(
@@ -108,7 +126,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(
                         CONF_FILE_PATH,
                         default=entry.data[CONF_FILE_PATH],
-                    ): str
+                    ): str,
+                    vol.Optional(
+                        CONF_MEDIA_LIBRARY_PATH,
+                        default=entry.data.get(
+                            CONF_MEDIA_LIBRARY_PATH, entry.data[CONF_FILE_PATH]
+                        ),
+                    ): str,
                 }
             ),
             errors=errors,

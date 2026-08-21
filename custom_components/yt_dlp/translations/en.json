@@ -3,7 +3,7 @@
   "config": {
     "abort": {
       "already_configured": "Already configured. Only one YouTube-DLP configuration is supported.",
-      "reconfigure_successful": "Download folder updated."
+      "reconfigure_successful": "Download and music library folders updated."
     },
     "error": {
       "cannot_create_folder": "The download folder cannot be created or is not writable."
@@ -13,19 +13,23 @@
         "title": "YouTube-DLP",
         "description": "Choose the folder where finished audio/video files will be stored.",
         "data": {
-          "file_path": "Download folder"
+          "file_path": "Download folder",
+          "media_library_path": "Music library folder"
         },
         "data_description": {
-          "file_path": "Absolute path where completed audio/video files are stored."
+          "file_path": "Absolute path where completed audio/video files are stored.",
+          "media_library_path": "Folder scanned for local audio playback. Leave empty to use the download folder."
         }
       },
       "reconfigure": {
         "title": "Change download folder",
         "data": {
-          "file_path": "Download folder"
+          "file_path": "Download folder",
+          "media_library_path": "Music library folder"
         },
         "data_description": {
-          "file_path": "Absolute path where completed audio/video files are stored."
+          "file_path": "Absolute path where completed audio/video files are stored.",
+          "media_library_path": "Folder scanned for local audio playback. Defaults to the download folder."
         }
       }
     }
@@ -207,6 +211,30 @@
           "description": "Number of results to return (1-50)."
         }
       }
+    },
+    "play": {
+      "name": "Play YouTube on speaker",
+      "description": "Resolves a direct audio stream with yt-dlp and immediately plays it on the selected Home Assistant media player without downloading a file.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "YouTube or other yt-dlp-supported HTTP(S) media URL."
+        },
+        "media_player": {
+          "name": "Speaker",
+          "description": "Home Assistant media player that will play the resolved audio stream."
+        }
+      }
+    },
+    "scan_library": {
+      "name": "Scan music library",
+      "description": "Returns supported audio files from the configured music library folder. The scan runs outside the Home Assistant event loop and is cached briefly.",
+      "fields": {
+        "force": {
+          "name": "Force rescan",
+          "description": "Ignore the short library cache and scan the folder again now."
+        }
+      }
     }
   },
   "exceptions": {
@@ -221,6 +249,12 @@
     },
     "job_not_found": {
       "message": "Download job {job_id} was not found or has expired from retained history."
+    },
+    "play_failed": {
+      "message": "Direct media playback failed: {error}"
+    },
+    "library_scan_failed": {
+      "message": "The music library scan failed: {error}"
     }
   },
   "selector": {

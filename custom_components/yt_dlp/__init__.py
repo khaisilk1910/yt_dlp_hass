@@ -8,18 +8,27 @@ from urllib.parse import urlparse
 import voluptuous as vol
 
 from homeassistant.components.ffmpeg import get_ffmpeg_manager
+from homeassistant.components.media_player import (
+    ATTR_MEDIA_CONTENT_ID,
+    ATTR_MEDIA_CONTENT_TYPE,
+    ATTR_MEDIA_EXTRA,
+    SERVICE_PLAY_MEDIA,
+)
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import CONF_FILE_PATH
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_loaded_integration
 
 from .const import (
     ATTR_AUDIO_FORMAT,
     ATTR_AUDIO_QUALITY,
+    ATTR_FORCE,
     ATTR_JOB_ID,
     ATTR_LIMIT,
+    ATTR_MEDIA_PLAYER,
     ATTR_MEDIA_TYPE,
     ATTR_OVERWRITE,
     ATTR_QUERY,
@@ -35,6 +44,7 @@ from .const import (
     DEFAULT_SEARCH_LIMIT,
     DEFAULT_VIDEO_FORMAT,
     DEFAULT_VIDEO_QUALITY,
+    CONF_MEDIA_LIBRARY_PATH,
     DOMAIN,
     MAX_SEARCH_LIMIT,
     MEDIA_TYPE_AUDIO,
@@ -45,13 +55,19 @@ from .const import (
     SERVICE_DOWNLOAD_AUDIO,
     SERVICE_DOWNLOAD_VIDEO,
     SERVICE_GET_JOB,
+    SERVICE_PLAY,
+    SERVICE_SCAN_LIBRARY,
     SERVICE_SEARCH,
     STATE_DOWNLOADER,
     VIDEO_FORMATS,
     VIDEO_QUALITIES,
+    VERSION,
 )
 from .helpers import normalize_download_directory
+from .frontend import async_register_media_card
 from .manager import DownloadRequest, YoutubeDlpManager
+from .media_http import YoutubeDlpMediaView
+from .playback import PlaybackManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -145,6 +161,28 @@ SEARCH_SCHEMA = vol.Schema(
 )
 
 
+def _media_player_entity(value: str) -> str:
+    """Validate a single media_player entity id."""
+    value = cv.entity_id(value)
+    if not value.startswith("media_player."):
+        raise vol.Invalid("expected a media_player entity")
+    return value
+
+
+PLAY_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_URL): _http_url,
+        vol.Required(ATTR_MEDIA_PLAYER): _media_player_entity,
+    }
+)
+
+SCAN_LIBRARY_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_FORCE, default=False): cv.boolean,
+    }
+)
+
+
 def _get_loaded_manager(hass: HomeAssistant) -> YoutubeDlpManager:
     """Return the single loaded manager or raise a user-facing action error."""
     for entry in hass.config_entries.async_entries(DOMAIN):
@@ -159,8 +197,21 @@ def _get_loaded_manager(hass: HomeAssistant) -> YoutubeDlpManager:
     )
 
 
+def get_playback_manager(hass: HomeAssistant) -> PlaybackManager:
+    """Return the playback manager attached to the loaded download manager."""
+    manager = _get_loaded_manager(hass)
+    playback = getattr(manager, "playback_manager", None)
+    if isinstance(playback, PlaybackManager):
+        return playback
+    raise ServiceValidationError(
+        translation_domain=DOMAIN,
+        translation_key="not_configured",
+    )
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register actions independently of config entry loading."""
+    hass.http.register_view(YoutubeDlpMediaView())
 
     async def _run_download(
         call: ServiceCall, request: DownloadRequest
@@ -273,6 +324,59 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "results": results,
         }
 
+    async def async_play(call: ServiceCall) -> ServiceResponse | None:
+        """Resolve a remote audio stream and start playback on one HA player."""
+        playback = get_playback_manager(hass)
+        entity_id = call.data[ATTR_MEDIA_PLAYER]
+        try:
+            info = await playback.async_resolve_stream(call.data[ATTR_URL])
+            metadata: dict[str, object] = {"title": info.title}
+            if info.artist:
+                metadata["artist"] = info.artist
+            if info.thumbnail:
+                metadata["images"] = [{"url": info.thumbnail}]
+
+            await hass.services.async_call(
+                "media_player",
+                SERVICE_PLAY_MEDIA,
+                service_data={
+                    ATTR_MEDIA_CONTENT_ID: info.url,
+                    ATTR_MEDIA_CONTENT_TYPE: info.mime_type,
+                    ATTR_MEDIA_EXTRA: {"metadata": metadata},
+                },
+                target={"entity_id": entity_id},
+                blocking=True,
+                context=call.context,
+            )
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="play_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+
+        response = {"media_player": entity_id, **info.as_dict()}
+        return response if call.return_response else None
+
+    async def async_scan_library(call: ServiceCall) -> ServiceResponse:
+        """Scan or return the cached configured local music library."""
+        playback = get_playback_manager(hass)
+        try:
+            items = await playback.async_scan_library(force=call.data[ATTR_FORCE])
+        except Exception as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="library_scan_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        return {
+            "path": playback.library_path,
+            "count": len(items),
+            "items": items,
+        }
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_DOWNLOAD,
@@ -308,6 +412,20 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         schema=SEARCH_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PLAY,
+        async_play,
+        schema=PLAY_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SCAN_LIBRARY,
+        async_scan_library,
+        schema=SCAN_LIBRARY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
     return True
 
 
@@ -322,10 +440,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ffmpeg_path = get_ffmpeg_manager(hass).binary
 
     manager = YoutubeDlpManager(hass, entry, download_path, ffmpeg_path)
+    library_path = normalize_download_directory(
+        entry.data.get(CONF_MEDIA_LIBRARY_PATH, download_path)
+    )
+    manager.playback_manager = PlaybackManager(hass, entry, library_path)
     entry.runtime_data = manager
     manager.async_publish_state()
 
-    _LOGGER.info("YouTube-DLP ready: output=%s", download_path)
+    # Resource storage/static registration is asynchronous and independent of
+    # downloads. Derive the cache-busting version from manifest.json so every
+    # future HACS update automatically gets a new resource URL when its version
+    # changes, without maintaining a second frontend version manually.
+    integration_version = async_get_loaded_integration(hass, DOMAIN).version
+    card_version = str(integration_version) if integration_version is not None else VERSION
+    entry.async_create_background_task(
+        hass,
+        async_register_media_card(hass, card_version),
+        "yt_dlp_frontend_registration",
+    )
+
+    _LOGGER.info(
+        "YouTube-DLP ready: output=%s library=%s", download_path, library_path
+    )
     return True
 
 

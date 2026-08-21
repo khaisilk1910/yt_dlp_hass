@@ -6,7 +6,9 @@
   ],
   "config_flow": true,
   "dependencies": [
-    "ffmpeg"
+    "ffmpeg",
+    "frontend",
+    "media_source"
   ],
   "documentation": "https://github.com/khaisilk1910/yt_dlp_hass",
   "integration_type": "service",
@@ -17,5 +19,5 @@
     "yt-dlp-ejs==0.8.0"
   ],
   "single_config_entry": true,
-  "version": "0.3.1"
+  "version": "0.4.0"
 }

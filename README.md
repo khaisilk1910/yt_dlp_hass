@@ -73,3 +73,31 @@ Việc sử dụng tích hợp phải tuân thủ **Điều khoản dịch vụ 
 Dự án này là một tích hợp độc lập, không phải sản phẩm chính thức và không được YouTube hoặc Google tài trợ, chứng nhận hay liên kết. YouTube có thể thay đổi hệ thống, API, cơ chế phân phối media hoặc biện pháp bảo vệ bất cứ lúc nào, vì vậy khả năng tải xuống có thể thay đổi hoặc ngừng hoạt động mà không báo trước.
 
 Người dùng tự chịu trách nhiệm về cách sử dụng tích hợp và nội dung mình tải xuống. Tác giả/người duy trì dự án không chịu trách nhiệm đối với việc sử dụng sai mục đích, vi phạm bản quyền hoặc điều khoản dịch vụ, hạn chế tài khoản/mạng, mất dữ liệu, gián đoạn dịch vụ hay bất kỳ thiệt hại trực tiếp hoặc gián tiếp nào phát sinh từ việc cài đặt hoặc sử dụng tích hợp này.
+
+## Direct playback and dashboard media card
+
+Version 0.4.0 adds direct audio playback without changing the existing download
+worker. The integration bundles and automatically registers the Lovelace custom
+card `custom:yt-dlp-media-card`.
+
+The card provides a media-player selector, YouTube URL playback, play/pause,
+stop, previous/next, seek, volume/mute, and a searchable local music library.
+The library folder is configured separately and defaults to the download folder.
+Filesystem scanning is performed only when requested by the UI/action and runs in
+Home Assistant's executor with a short cache; it is not scanned during startup.
+
+Automation example:
+
+```yaml
+action: yt_dlp.play
+data:
+  url: "https://www.youtube.com/watch?v=..."
+  media_player: media_player.living_room
+```
+
+For a new dashboard card, choose **YouTube-DLP Media Player** from the custom card
+picker, or use:
+
+```yaml
+type: custom:yt-dlp-media-card
+```

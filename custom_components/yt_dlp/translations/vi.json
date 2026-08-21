@@ -3,7 +3,7 @@
   "config": {
     "abort": {
       "already_configured": "Integration đã được cấu hình. Chỉ hỗ trợ một cấu hình YouTube-DLP.",
-      "reconfigure_successful": "Đã cập nhật thư mục tải xuống."
+      "reconfigure_successful": "Đã cập nhật thư mục tải xuống và thư viện nhạc."
     },
     "error": {
       "cannot_create_folder": "Không thể tạo thư mục tải xuống hoặc thư mục không có quyền ghi."
@@ -13,19 +13,23 @@
         "title": "YouTube-DLP",
         "description": "Chọn thư mục lưu các file audio/video đã hoàn tất.",
         "data": {
-          "file_path": "Thư mục tải xuống"
+          "file_path": "Thư mục tải xuống",
+          "media_library_path": "Thư mục thư viện nhạc"
         },
         "data_description": {
-          "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất."
+          "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất.",
+          "media_library_path": "Thư mục sẽ quét để phát file nhạc cục bộ. Để trống khi cấu hình lần đầu để dùng cùng thư mục tải xuống."
         }
       },
       "reconfigure": {
         "title": "Đổi thư mục tải xuống",
         "data": {
-          "file_path": "Thư mục tải xuống"
+          "file_path": "Thư mục tải xuống",
+          "media_library_path": "Thư mục thư viện nhạc"
         },
         "data_description": {
-          "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất."
+          "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất.",
+          "media_library_path": "Thư mục sẽ quét để phát file nhạc cục bộ. Mặc định dùng cùng thư mục tải xuống."
         }
       }
     }
@@ -207,6 +211,30 @@
           "description": "Số kết quả trả về (1-50)."
         }
       }
+    },
+    "play": {
+      "name": "Phát YouTube ra loa",
+      "description": "Dùng yt-dlp lấy luồng âm thanh trực tiếp rồi phát ngay trên media player đã chọn, không tải file xuống.",
+      "fields": {
+        "url": {
+          "name": "Link",
+          "description": "Link YouTube hoặc URL HTTP(S) được yt-dlp hỗ trợ."
+        },
+        "media_player": {
+          "name": "Loa",
+          "description": "Media player của Home Assistant sẽ phát luồng âm thanh."
+        }
+      }
+    },
+    "scan_library": {
+      "name": "Quét thư viện nhạc",
+      "description": "Trả về các file âm thanh được hỗ trợ trong thư mục thư viện đã cấu hình. Quá trình quét chạy ngoài event loop và có cache ngắn.",
+      "fields": {
+        "force": {
+          "name": "Buộc quét lại",
+          "description": "Bỏ qua cache thư viện ngắn và quét lại thư mục ngay."
+        }
+      }
     }
   },
   "exceptions": {
@@ -221,6 +249,12 @@
     },
     "job_not_found": {
       "message": "Không tìm thấy job tải {job_id} hoặc job đã hết thời gian lưu trong lịch sử."
+    },
+    "play_failed": {
+      "message": "Phát media trực tiếp thất bại: {error}"
+    },
+    "library_scan_failed": {
+      "message": "Quét thư viện nhạc thất bại: {error}"
     }
   },
   "selector": {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
+VERSION = "0.4.0"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 
@@ -11,6 +12,8 @@ SERVICE_DOWNLOAD_VIDEO = "download_video"
 SERVICE_DOWNLOAD_AUDIO = "download_audio"
 SERVICE_GET_JOB = "get_job"
 SERVICE_SEARCH = "search"
+SERVICE_PLAY = "play"
+SERVICE_SCAN_LIBRARY = "scan_library"
 
 ATTR_URL = "url"
 ATTR_MEDIA_TYPE = "media_type"
@@ -23,6 +26,8 @@ ATTR_WAIT_FOR_COMPLETION = "wait_for_completion"
 ATTR_QUERY = "query"
 ATTR_LIMIT = "limit"
 ATTR_JOB_ID = "job_id"
+ATTR_MEDIA_PLAYER = "media_player"
+ATTR_FORCE = "force"
 
 MEDIA_TYPE_VIDEO = "video"
 MEDIA_TYPE_AUDIO = "audio"
@@ -39,6 +44,7 @@ DEFAULT_VIDEO_FORMAT = "mp4"
 DEFAULT_AUDIO_FORMAT = "mp3"
 DEFAULT_AUDIO_QUALITY = "192"
 DEFAULT_SEARCH_LIMIT = 10
+CONF_MEDIA_LIBRARY_PATH = "media_library_path"
 MAX_SEARCH_LIMIT = 50
 
 DEFAULT_FILENAME_TEMPLATE = "%(title).180B [%(id)s].%(ext)s"
