@@ -310,19 +310,70 @@ class YoutubeDlpManager:
             )
 
         # Let the installed yt-dlp choose its current upstream YouTube clients.
-        # The v0.2.1 403 fix worked by using a newer yt-dlp release; pinning old
-        # client assumptions here only makes the integration stale faster.
+        # Do not pin player clients or PO-token providers here; those assumptions
+        # become stale quickly and yt-dlp 2026.08.19 already carries current
+        # YouTube client maintenance/fallbacks.
         os.makedirs(job_temp, exist_ok=True)
-        ydl_opts = self._build_download_options(
-            request,
-            job_temp,
-            progress_hook,
-            postprocessor_hook,
-        )
         self.hass.add_job(self._set_job_status, job.job_id, "extracting")
 
-        with YoutubeDL(ydl_opts) as ydl:
-            extracted = ydl.extract_info(request.url, download=True)
+        audio_selectors: tuple[str | None, ...]
+        if request.media_type == MEDIA_TYPE_AUDIO:
+            audio_selectors = self._audio_source_selectors()
+        else:
+            audio_selectors = (None,)
+
+        extracted: Any = None
+        last_error: Exception | None = None
+        for attempt, audio_selector in enumerate(audio_selectors, start=1):
+            if job.cancel_event.is_set():
+                raise DownloadCancelled(
+                    "Download cancelled because the integration is unloading"
+                )
+
+            attempt_temp = (
+                os.path.join(job_temp, f"attempt-{attempt}")
+                if len(audio_selectors) > 1
+                else job_temp
+            )
+            os.makedirs(attempt_temp, exist_ok=True)
+            ydl_opts = self._build_download_options(
+                request,
+                attempt_temp,
+                progress_hook,
+                postprocessor_hook,
+                audio_source_selector=audio_selector,
+            )
+
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    extracted = ydl.extract_info(request.url, download=True)
+                last_error = None
+                break
+            except DownloadCancelled:
+                raise
+            except DownloadError as err:
+                last_error = err
+                if not self._should_retry_audio_download(
+                    request, err, attempt, len(audio_selectors)
+                ):
+                    raise
+
+                next_selector = audio_selectors[attempt]
+                _LOGGER.warning(
+                    "Audio source attempt %s/%s failed for job %s (%s); "
+                    "retrying with fallback selector %s",
+                    attempt,
+                    len(audio_selectors),
+                    job.job_id,
+                    self._short_error(err),
+                    next_selector,
+                )
+                shutil.rmtree(attempt_temp, ignore_errors=True)
+                self.hass.add_job(self._reset_job_progress_for_retry, job.job_id)
+
+        if last_error is not None:
+            raise last_error
+
         info = extracted if isinstance(extracted, Mapping) else None
 
         if not info:
@@ -354,6 +405,8 @@ class YoutubeDlpManager:
         temp_path: str,
         progress_hook: Any,
         postprocessor_hook: Any,
+        *,
+        audio_source_selector: str | None = None,
     ) -> dict[str, Any]:
         """Build controlled yt-dlp options from service fields."""
         opts: dict[str, Any] = {
@@ -391,17 +444,40 @@ class YoutubeDlpManager:
             opts["js_runtimes"] = js_runtimes
 
         if request.media_type == MEDIA_TYPE_AUDIO:
-            opts.update(self._audio_options(request))
+            opts.update(self._audio_options(request, audio_source_selector))
         else:
             opts.update(self._video_options(request))
         return opts
 
     @staticmethod
-    def _audio_options(request: DownloadRequest) -> dict[str, Any]:
+    def _audio_source_selectors() -> tuple[str, ...]:
+        """Return distinct source routes for resilient YouTube audio downloads.
+
+        YouTube can expose a DASH format successfully and still return HTTP 403
+        for its media URL. A slash-separated yt-dlp selector only falls back when
+        a format is unavailable, not when the selected media URL later returns
+        403. Keep the routes distinct so the worker can retry a different stream.
+        """
+        return (
+            # M4A/MP4A is also the audio route used by our successful MP4 video
+            # downloads and is generally the least expensive audio-only fallback.
+            "ba[ext=m4a]/ba[acodec^=mp4a]",
+            # Try the independent WebM/Opus DASH route next.
+            "ba[ext=webm]/ba[acodec^=opus]",
+            # Last resort: use HLS or a progressive muxed stream and let FFmpeg
+            # extract the audio. This downloads video bytes too, but avoids a
+            # hard failure when YouTube rejects all separate DASH audio URLs.
+            "ba[protocol^=m3u8]/b[protocol^=m3u8]/b[ext=mp4]/b",
+        )
+
+    @staticmethod
+    def _audio_options(
+        request: DownloadRequest, source_selector: str | None = None
+    ) -> dict[str, Any]:
         """Return yt-dlp options for an audio-only final file."""
         quality = "0" if request.audio_quality == "best" else request.audio_quality
         return {
-            "format": "bestaudio/best",
+            "format": source_selector or "ba[ext=m4a]/ba/b",
             "final_ext": request.audio_format,
             "postprocessors": [
                 {
@@ -411,6 +487,43 @@ class YoutubeDlpManager:
                 }
             ],
         }
+
+    @staticmethod
+    def _short_error(error: Exception) -> str:
+        """Return one compact log line for a yt-dlp failure."""
+        text = " ".join(str(error).split())
+        return text[:240]
+
+    @staticmethod
+    def _should_retry_audio_download(
+        request: DownloadRequest,
+        error: Exception,
+        attempt: int,
+        total_attempts: int,
+    ) -> bool:
+        """Return whether an audio failure should try another source route."""
+        if request.media_type != MEDIA_TYPE_AUDIO or attempt >= total_attempts:
+            return False
+
+        message = str(error).casefold()
+        return (
+            "http error 403" in message
+            or "403: forbidden" in message
+            or "requested format is not available" in message
+        )
+
+    def _reset_job_progress_for_retry(self, job_id: str) -> None:
+        """Clear stale byte counters before a different audio source retry."""
+        job = self.jobs.get(job_id)
+        if job is None:
+            return
+        job.status = "extracting"
+        job.filename = None
+        job.downloaded_bytes = 0
+        job.total_bytes = None
+        job.speed = None
+        job.eta = None
+        self.async_publish_state()
 
     @staticmethod
     def _video_options(request: DownloadRequest) -> dict[str, Any]:

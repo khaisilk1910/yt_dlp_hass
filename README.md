@@ -12,6 +12,7 @@ Custom integration for searching YouTube and downloading video/audio with `yt-dl
 - `yt-dlp` is imported lazily on the first action through Home Assistant's import helper, so integration setup remains lightweight.
 - Download jobs run in the background by default and are concurrency-limited.
 - Temporary `.part`/fragment files are isolated under `.yt_dlp_tmp/<job_id>` and cleaned after completion/failure.
+- Audio downloads use distinct source-stream fallbacks on HTTP 403: M4A/MP4A, then WebM/Opus, then HLS/progressive media before FFmpeg extracts the requested final audio format.
 - Uses Home Assistant's built-in `ffmpeg` integration as the binary hint, then lazily resolves executable names such as `ffmpeg` to an absolute path before passing them to yt-dlp.
 - The configured download directory and JavaScript runtime are checked lazily only when an action needs them; an unavailable NAS/mount therefore does not block Home Assistant startup.
 - Uses `ConfigEntry.runtime_data`, config-entry-only schema, native service response support and Home Assistant thread-safe job scheduling.
@@ -111,6 +112,8 @@ data:
 Audio formats: `mp3`, `m4a`, `opus`, `flac`, `wav`.
 
 Audio quality targets: `best`, `320`, `256`, `192`, `128`, `96` kbps.
+
+For YouTube reliability, the requested final audio format is intentionally separated from the source-stream choice. The worker first tries an M4A/MP4A audio-only stream (the same audio family used by MP4 video downloads), then WebM/Opus. If YouTube returns HTTP 403 or the route is unavailable, a final HLS/progressive fallback is tried and FFmpeg extracts/converts only the audio. Fallback attempts use isolated temp directories so a rejected partial DASH fragment is never resumed as a different source. yt-dlp remains on its default current player-client logic; no hard-coded player client or PO-token provider is injected.
 
 ### `yt_dlp.download` (combined)
 
@@ -217,28 +220,28 @@ Because HACS uses the source of the release/tag when `zip_release` is not enable
 Use the included helper:
 
 ```bash
-./scripts/release.sh v0.2.5
+./scripts/release.sh v0.2.6
 ```
 
 It:
 
 1. requires a clean Git working tree;
-2. updates `custom_components/yt_dlp/manifest.json` to `0.2.5`;
+2. updates `custom_components/yt_dlp/manifest.json` to `0.2.6`;
 3. keeps manifest keys in Hassfest order;
 4. compiles Python as a quick local check;
-5. commits `Release v0.2.5`;
-6. creates annotated tag `v0.2.5`.
+5. commits `Release v0.2.6`;
+6. creates annotated tag `v0.2.6`.
 
 Then push:
 
 ```bash
 git push origin main
-git push origin v0.2.5
+git push origin v0.2.6
 ```
 
-`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.2.5`. No fixed `yt_dlp.zip` asset is created.
+`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.2.6`. No fixed `yt_dlp.zip` asset is created.
 
-If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.2.5`, and push that new tag.
+If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.2.6`, and push that new tag.
 
 ## Notes
 
