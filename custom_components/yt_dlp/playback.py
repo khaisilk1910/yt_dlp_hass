@@ -110,7 +110,7 @@ class PlaybackManager:
 
     def _resolve_stream_sync(self, url: str) -> StreamInfo:
         """Blocking yt-dlp metadata extraction. Executor thread only."""
-        from yt_dlp import YoutubeDL
+        from yt_dlp.YoutubeDL import YoutubeDL
         from yt_dlp.utils import DownloadError
 
         opts: dict[str, Any] = {

@@ -76,7 +76,7 @@ Người dùng tự chịu trách nhiệm về cách sử dụng tích hợp và
 
 ## Direct playback and dashboard media card
 
-Version 0.4.2 includes direct audio playback and the dashboard media card without
+Version 0.4.3 includes direct audio playback and the dashboard media card without
 changing the existing download worker. The integration bundles and automatically
 registers the Lovelace custom card `custom:yt-dlp-media-card`.
 

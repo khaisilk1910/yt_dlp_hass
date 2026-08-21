@@ -280,7 +280,7 @@ class YoutubeDlpManager:
 
     def _download_sync_worker(self, job: DownloadJob, job_temp: str) -> DownloadResult:
         """Blocking yt-dlp worker implementation. Executor thread only."""
-        from yt_dlp import YoutubeDL
+        from yt_dlp.YoutubeDL import YoutubeDL
         from yt_dlp.utils import DownloadCancelled, DownloadError
 
         request = job.request
@@ -588,7 +588,7 @@ class YoutubeDlpManager:
 
     def _search_sync(self, query: str, limit: int) -> list[dict[str, Any]]:
         """Blocking YouTube search. Executor thread only."""
-        from yt_dlp import YoutubeDL
+        from yt_dlp.YoutubeDL import YoutubeDL
 
         opts: dict[str, Any] = {
             "quiet": True,
