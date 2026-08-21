@@ -8,6 +8,7 @@ Custom integration for searching YouTube and downloading video/audio with `yt-dl
 - `yt_dlp.download_video` and `yt_dlp.download_audio` remain available when you want a form containing only one media type.
 - `yt_dlp.get_job` returns the latest retained status/progress for background downloads.
 - `yt_dlp.search` returns title, thumbnail, video URL, duration, channel/uploader and other useful metadata.
+- Optional completion notifications can be enabled independently for Home Assistant persistent notifications, auto-discovered Companion App mobile targets, and Zalo Bot.
 - Download and search work run outside Home Assistant's event loop.
 - `yt-dlp` is imported lazily on the first action through Home Assistant's import helper, so integration setup remains lightweight.
 - Download jobs run in the background by default and are concurrency-limited.
@@ -76,6 +77,20 @@ and restart Home Assistant.
 Go to **Settings -> Devices & services -> Add integration -> YouTube-DLP** and choose the absolute folder for completed media files.
 
 The config flow validates that the folder can be created and written. Normal Home Assistant startup does not touch that folder. It is checked again only when a download actually begins.
+
+## Completion notifications
+
+Open **Settings -> Devices & services -> YouTube-DLP -> Configure**. Notification settings are stored in `ConfigEntry.options`, so changing them does not reload the integration or interrupt active downloads.
+
+Three independent sections are available:
+
+- **Home Assistant** - sends through `notify.persistent_notification`, with `persistent_notification.create` as a compatibility fallback.
+- **Mobile device** - scans Home Assistant's in-memory service registry every time the options screen opens and lists the currently registered `notify.mobile_app_*` Companion App actions.
+- **Zalo** - sends through `zalo_bot.send_message`; configure `Thread ID`, `Zalo account`, and `Type` (`User` -> `0`, `Group` -> `1`). Thread IDs stay strings so large Zalo IDs are not rounded.
+
+Notifications are sent only after a job reaches `completed`. Delivery uses non-blocking Home Assistant action calls; if a phone/Zalo target is unavailable, the download remains successful and the integration only writes a warning to the log.
+
+The completion payload now also exposes useful final metadata such as final format, quality, file size, duration, resolution, channel/uploader and source URL when yt-dlp provides it. The notification formats are optimized per destination: Markdown for Home Assistant and compact emoji-based plain text for mobile/Zalo.
 
 ## Download actions
 
@@ -150,6 +165,30 @@ speed: 1234567.0
 eta: 0
 final_files:
   - /media/youtube/Example [VIDEO_ID].m4a
+file_size_bytes: 12345678
+format: m4a
+quality: 256 kbps
+duration: 295.0
+duration_string: "4:55"
+resolution: null
+width: null
+height: null
+channel: Example Channel
+uploader: Example Channel
+source_url: https://www.youtube.com/watch?v=VIDEO_ID
+metadata:
+  id: VIDEO_ID
+  source_url: https://www.youtube.com/watch?v=VIDEO_ID
+  duration: 295.0
+  duration_string: "4:55"
+  channel: Example Channel
+  uploader: Example Channel
+  format: m4a
+  quality: 256 kbps
+  resolution: null
+  width: null
+  height: null
+  file_size_bytes: 12345678
 error: null
 ```
 
@@ -220,28 +259,28 @@ Because HACS uses the source of the release/tag when `zip_release` is not enable
 Use the included helper:
 
 ```bash
-./scripts/release.sh v0.2.6
+./scripts/release.sh v0.3.0
 ```
 
 It:
 
 1. requires a clean Git working tree;
-2. updates `custom_components/yt_dlp/manifest.json` to `0.2.6`;
+2. updates `custom_components/yt_dlp/manifest.json` to `0.3.0`;
 3. keeps manifest keys in Hassfest order;
 4. compiles Python as a quick local check;
-5. commits `Release v0.2.6`;
-6. creates annotated tag `v0.2.6`.
+5. commits `Release v0.3.0`;
+6. creates annotated tag `v0.3.0`.
 
 Then push:
 
 ```bash
 git push origin main
-git push origin v0.2.6
+git push origin v0.3.0
 ```
 
-`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.2.6`. No fixed `yt_dlp.zip` asset is created.
+`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.3.0`. No fixed `yt_dlp.zip` asset is created.
 
-If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.2.6`, and push that new tag.
+If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.3.1`, and push that new tag.
 
 ## Notes
 

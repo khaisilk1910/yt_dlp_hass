@@ -9,7 +9,7 @@ fi
 TAG="$1"
 VERSION="${TAG#v}"
 if [[ "$TAG" == "$VERSION" || ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Invalid tag '$TAG'. Use vX.Y.Z, for example v0.2.6" >&2
+  echo "Invalid tag '$TAG'. Use vX.Y.Z, for example v0.3.0" >&2
   exit 2
 fi
 

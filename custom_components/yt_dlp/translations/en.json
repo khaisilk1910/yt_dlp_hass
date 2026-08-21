@@ -30,6 +30,59 @@
       }
     }
   },
+  "options": {
+    "error": {
+      "mobile_action_required": "Enable a mobile notification only after selecting a Companion App notification target.",
+      "mobile_action_unavailable": "The selected mobile notification target is no longer registered. Reopen this screen and select an available device.",
+      "zalo_fields_required": "Zalo notifications require both Thread ID and Zalo account."
+    },
+    "step": {
+      "init": {
+        "title": "Download notifications",
+        "description": "Choose where YouTube-DLP sends a message after a download finishes successfully. Notification delivery is separate from the download job, so an unavailable notification target will not change a completed download into a failure.",
+        "sections": {
+          "notify_home_assistant": {
+            "name": "Home Assistant",
+            "description": "Send a persistent notification in Home Assistant using notify.persistent_notification (with persistent_notification.create as a compatibility fallback).",
+            "data": {
+              "enabled": "Send Home Assistant notification"
+            },
+            "data_description": {
+              "enabled": "Show the completed filename and available file/media details in the Home Assistant notifications panel."
+            }
+          },
+          "notify_mobile": {
+            "name": "Mobile device",
+            "description": "Companion App notification targets are discovered automatically from registered notify.mobile_app_* actions each time this screen is opened.",
+            "data": {
+              "enabled": "Send mobile notification",
+              "mobile_notify_action": "Mobile device"
+            },
+            "data_description": {
+              "enabled": "Send a compact push notification after a successful download.",
+              "mobile_notify_action": "Choose the Companion App device that should receive the notification."
+            }
+          },
+          "notify_zalo": {
+            "name": "Zalo",
+            "description": "Send a message through zalo_bot.send_message. Thread ID is kept as text so large Zalo IDs are preserved exactly.",
+            "data": {
+              "enabled": "Send Zalo notification",
+              "thread_id": "Thread ID",
+              "account_selection": "Zalo account",
+              "type": "Type"
+            },
+            "data_description": {
+              "enabled": "Send a formatted Zalo message after a successful download.",
+              "thread_id": "Target user/group thread ID.",
+              "account_selection": "Zalo account used by the Zalo Bot integration, for example +8437....",
+              "type": "Choose User or Group. User is sent as type 0 and Group as type 1."
+            }
+          }
+        }
+      }
+    }
+  },
   "services": {
     "download_video": {
       "name": "Download video",
@@ -175,6 +228,12 @@
       "options": {
         "video": "Video",
         "audio": "Audio"
+      }
+    },
+    "zalo_type": {
+      "options": {
+        "user": "User",
+        "group": "Group"
       }
     }
   }

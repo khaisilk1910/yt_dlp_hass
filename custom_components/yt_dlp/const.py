@@ -49,3 +49,23 @@ MAX_CONCURRENT_DOWNLOADS = 2
 MAX_CONCURRENT_SEARCHES = 2
 MAX_RETAINED_JOBS = 50
 RESPONSE_METADATA_TIMEOUT = 15
+
+# Options-flow notification settings. They intentionally live in ConfigEntry.options
+# because they change runtime behavior but are not required to set up the integration.
+SECTION_NOTIFY_HOME_ASSISTANT = "notify_home_assistant"
+SECTION_NOTIFY_MOBILE = "notify_mobile"
+SECTION_NOTIFY_ZALO = "notify_zalo"
+
+CONF_NOTIFY_ENABLED = "enabled"
+CONF_MOBILE_NOTIFY_ACTION = "mobile_notify_action"
+CONF_ZALO_THREAD_ID = "thread_id"
+CONF_ZALO_ACCOUNT = "account_selection"
+CONF_ZALO_TYPE = "type"
+
+ZALO_TYPE_USER = "user"
+ZALO_TYPE_GROUP = "group"
+ZALO_TYPES = (ZALO_TYPE_USER, ZALO_TYPE_GROUP)
+ZALO_SERVICE_DOMAIN = "zalo_bot"
+ZALO_SERVICE_SEND_MESSAGE = "send_message"
+
+DEFAULT_NOTIFY_ENABLED = False

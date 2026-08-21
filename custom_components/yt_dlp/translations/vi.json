@@ -30,6 +30,59 @@
       }
     }
   },
+  "options": {
+    "error": {
+      "mobile_action_required": "Hãy chọn thiết bị Companion App trước khi bật thông báo lên điện thoại.",
+      "mobile_action_unavailable": "Thiết bị thông báo đã chọn hiện không còn được đăng ký. Hãy mở lại màn hình này và chọn một thiết bị đang khả dụng.",
+      "zalo_fields_required": "Thông báo Zalo cần nhập đủ Thread ID và Zalo account."
+    },
+    "step": {
+      "init": {
+        "title": "Thông báo khi tải xong",
+        "description": "Chọn nơi YouTube-DLP gửi thông báo sau khi tải file thành công. Việc gửi thông báo tách biệt với job tải, vì vậy thiết bị/kênh thông báo không khả dụng sẽ không làm một file đã tải thành công bị chuyển sang trạng thái lỗi.",
+        "sections": {
+          "notify_home_assistant": {
+            "name": "Home Assistant",
+            "description": "Gửi thông báo thường trực trong Home Assistant bằng notify.persistent_notification; tự dùng persistent_notification.create làm phương án tương thích nếu cần.",
+            "data": {
+              "enabled": "Gửi thông báo lên Home Assistant"
+            },
+            "data_description": {
+              "enabled": "Hiển thị tên file đã tải và các thông tin media/file lấy được trong bảng thông báo của Home Assistant."
+            }
+          },
+          "notify_mobile": {
+            "name": "Thiết bị điện thoại",
+            "description": "Mỗi lần mở màn hình này, tích hợp tự quét các action notify.mobile_app_* đã đăng ký bởi Home Assistant Companion App.",
+            "data": {
+              "enabled": "Gửi thông báo lên điện thoại",
+              "mobile_notify_action": "Thiết bị nhận thông báo"
+            },
+            "data_description": {
+              "enabled": "Gửi push notification gọn, dễ đọc sau khi tải thành công.",
+              "mobile_notify_action": "Chọn điện thoại/máy tính bảng Companion App sẽ nhận thông báo."
+            }
+          },
+          "notify_zalo": {
+            "name": "Zalo",
+            "description": "Gửi tin nhắn qua zalo_bot.send_message. Thread ID được giữ dạng chuỗi để không làm thay đổi các ID Zalo có giá trị lớn.",
+            "data": {
+              "enabled": "Gửi thông báo lên Zalo",
+              "thread_id": "Thread ID",
+              "account_selection": "Zalo account",
+              "type": "Type"
+            },
+            "data_description": {
+              "enabled": "Gửi nội dung định dạng đẹp qua Zalo sau khi tải thành công.",
+              "thread_id": "Thread ID của user hoặc group nhận tin.",
+              "account_selection": "Tài khoản Zalo mà tích hợp Zalo Bot sử dụng, ví dụ +8437....",
+              "type": "Chọn User hoặc Group. User được gửi với type 0, Group với type 1."
+            }
+          }
+        }
+      }
+    }
+  },
   "services": {
     "download_video": {
       "name": "Tải video",
@@ -175,6 +228,12 @@
       "options": {
         "video": "Video",
         "audio": "Âm thanh"
+      }
+    },
+    "zalo_type": {
+      "options": {
+        "user": "User",
+        "group": "Group"
       }
     }
   }
