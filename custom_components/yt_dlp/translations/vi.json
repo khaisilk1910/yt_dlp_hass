@@ -84,8 +84,8 @@
       }
     },
     "download": {
-      "name": "Tải media (action gộp cũ)",
-      "description": "Action gộp để tương thích cấu hình cũ. Home Assistant hiện không hỗ trợ ẩn động field của service theo một field khác; hãy dùng Tải video hoặc Tải âm thanh để có biểu mẫu chỉ hiện đúng tùy chọn.",
+      "name": "Tải media",
+      "description": "Tải video hoặc âm thanh trong một action gộp. Nhóm tùy chọn Video được mở sẵn và nhóm Audio được thu gọn; cả hai nhóm vẫn có thể mở/thu gọn trực tiếp trong Home Assistant.",
       "fields": {
         "url": {
           "name": "URL",
@@ -93,7 +93,7 @@
         },
         "media_type": {
           "name": "Loại media",
-          "description": "Tải video hoặc chỉ tách âm thanh."
+          "description": "Chọn Video hoặc Âm thanh. Home Assistant hiện chưa hỗ trợ đổi trạng thái mở/thu gọn của section service theo giá trị field này theo thời gian thực."
         },
         "video_quality": {
           "name": "Chất lượng video",
@@ -122,10 +122,12 @@
       },
       "sections": {
         "video_options": {
-          "name": "Tùy chọn video"
+          "name": "Tùy chọn video",
+          "description": "Chất lượng và định dạng đầu ra dùng khi Loại media là Video."
         },
         "audio_options": {
-          "name": "Tùy chọn âm thanh"
+          "name": "Tùy chọn âm thanh",
+          "description": "Định dạng và bitrate dùng khi Loại media là Âm thanh."
         }
       }
     },
@@ -166,6 +168,14 @@
     },
     "job_not_found": {
       "message": "Không tìm thấy job tải {job_id} hoặc job đã hết thời gian lưu trong lịch sử."
+    }
+  },
+  "selector": {
+    "media_type": {
+      "options": {
+        "video": "Video",
+        "audio": "Âm thanh"
+      }
     }
   }
 }

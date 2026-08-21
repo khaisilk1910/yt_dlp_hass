@@ -7,7 +7,11 @@
       "service": "mdi:music"
     },
     "download": {
-      "service": "mdi:download"
+      "service": "mdi:download",
+      "sections": {
+        "video_options": "mdi:video",
+        "audio_options": "mdi:music"
+      }
     },
     "get_job": {
       "service": "mdi:progress-download"

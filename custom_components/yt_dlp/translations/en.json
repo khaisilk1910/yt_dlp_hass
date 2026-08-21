@@ -84,8 +84,8 @@
       }
     },
     "download": {
-      "name": "Download media (legacy combined)",
-      "description": "Backward-compatible combined action. Home Assistant service descriptions cannot dynamically hide fields based on another service field; use Download video or Download audio for a clean form.",
+      "name": "Download media",
+      "description": "Downloads video or audio using one combined action. Video options are expanded initially and audio options are collapsed; both groups remain manually collapsible in Home Assistant.",
       "fields": {
         "url": {
           "name": "URL",
@@ -93,7 +93,7 @@
         },
         "media_type": {
           "name": "Media type",
-          "description": "Download video or extract audio only."
+          "description": "Choose video or audio. Home Assistant does not currently support changing a service section's collapsed state dynamically from this field."
         },
         "video_quality": {
           "name": "Video quality",
@@ -122,10 +122,12 @@
       },
       "sections": {
         "video_options": {
-          "name": "Video options"
+          "name": "Video options",
+          "description": "Quality and output container used when Media type is Video."
         },
         "audio_options": {
-          "name": "Audio options"
+          "name": "Audio options",
+          "description": "Format and bitrate used when Media type is Audio."
         }
       }
     },
@@ -166,6 +168,14 @@
     },
     "job_not_found": {
       "message": "Download job {job_id} was not found or has expired from retained history."
+    }
+  },
+  "selector": {
+    "media_type": {
+      "options": {
+        "video": "Video",
+        "audio": "Audio"
+      }
     }
   }
 }

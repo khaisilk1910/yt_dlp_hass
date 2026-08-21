@@ -4,8 +4,8 @@ Custom integration for searching YouTube and downloading video/audio with `yt-dl
 
 ## Highlights
 
-- `yt_dlp.download_video` exposes only video options; `yt_dlp.download_audio` exposes only audio options.
-- `yt_dlp.download` remains available for backward compatibility with existing automations.
+- `yt_dlp.download` is the main combined action and groups Video/Audio settings into native collapsible sections.
+- `yt_dlp.download_video` and `yt_dlp.download_audio` remain available when you want a form containing only one media type.
 - `yt_dlp.get_job` returns the latest retained status/progress for background downloads.
 - `yt_dlp.search` returns title, thumbnail, video URL, duration, channel/uploader and other useful metadata.
 - Download and search work run outside Home Assistant's event loop.
@@ -112,9 +112,11 @@ Audio formats: `mp3`, `m4a`, `opus`, `flac`, `wav`.
 
 Audio quality targets: `best`, `320`, `256`, `192`, `128`, `96` kbps.
 
-### Legacy `yt_dlp.download`
+### `yt_dlp.download` (combined)
 
-The combined action is kept so existing automations do not break. Home Assistant's native `services.yaml` field filtering can filter service fields from selected entity attributes/features, but it does not provide field-to-field conditional visibility. For that reason a single `media_type` dropdown cannot reliably hide/show unrelated fields using only native service descriptions. Prefer `download_video` or `download_audio`; the legacy combined action groups video/audio options into collapsed sections.
+This is the main combined action. It keeps `media_type` plus two native Home Assistant collapsible sections. Because the default media type is `video`, **Video options starts expanded** and **Audio options starts collapsed**. The sections can be opened or collapsed manually in the action editor.
+
+Home Assistant 2026.8 service descriptions support an *initial* `collapsed` state for a section, but the section state cannot currently depend live on another service field. Service field `filter` also depends on selected entity features/attributes rather than another field such as `media_type`. Therefore the integration intentionally does not inject custom frontend JavaScript to force dynamic section switching. Use `download_video` / `download_audio` when you need Home Assistant to show only the applicable controls automatically.
 
 ### Response behavior
 
@@ -215,28 +217,28 @@ Because HACS uses the source of the release/tag when `zip_release` is not enable
 Use the included helper:
 
 ```bash
-./scripts/release.sh v0.2.4
+./scripts/release.sh v0.2.5
 ```
 
 It:
 
 1. requires a clean Git working tree;
-2. updates `custom_components/yt_dlp/manifest.json` to `0.2.4`;
+2. updates `custom_components/yt_dlp/manifest.json` to `0.2.5`;
 3. keeps manifest keys in Hassfest order;
 4. compiles Python as a quick local check;
-5. commits `Release v0.2.4`;
-6. creates annotated tag `v0.2.4`.
+5. commits `Release v0.2.5`;
+6. creates annotated tag `v0.2.5`.
 
 Then push:
 
 ```bash
 git push origin main
-git push origin v0.2.4
+git push origin v0.2.5
 ```
 
-`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.2.4`. No fixed `yt_dlp.zip` asset is created.
+`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.2.5`. No fixed `yt_dlp.zip` asset is created.
 
-If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.2.4`, and push that new tag.
+If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.2.5`, and push that new tag.
 
 ## Notes
 
