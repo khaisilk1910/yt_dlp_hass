@@ -51,11 +51,14 @@ from .const import (
     MEDIA_TYPE_VIDEO,
     MEDIA_TYPES,
     RESPONSE_METADATA_TIMEOUT,
+    SERVICE_ADD_FAVORITE,
     SERVICE_DOWNLOAD,
     SERVICE_DOWNLOAD_AUDIO,
     SERVICE_DOWNLOAD_VIDEO,
     SERVICE_GET_JOB,
+    SERVICE_LIST_FAVORITES,
     SERVICE_PLAY,
+    SERVICE_REMOVE_FAVORITE,
     SERVICE_SCAN_LIBRARY,
     SERVICE_SEARCH,
     STATE_DOWNLOADER,
@@ -181,6 +184,8 @@ SCAN_LIBRARY_SCHEMA = vol.Schema(
         vol.Optional(ATTR_FORCE, default=False): cv.boolean,
     }
 )
+
+FAVORITE_URL_SCHEMA = vol.Schema({vol.Required(ATTR_URL): _http_url})
 
 
 def _get_loaded_manager(hass: HomeAssistant) -> YoutubeDlpManager:
@@ -380,6 +385,35 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "items": items,
         }
 
+    async def async_list_favorites(call: ServiceCall) -> ServiceResponse:
+        """Return persistent favorites for dashboard clients."""
+        playback = get_playback_manager(hass)
+        try:
+            items = await playback.async_list_favorites()
+        except Exception as err:
+            raise HomeAssistantError(str(err)) from err
+        return {"count": len(items), "items": items}
+
+    async def async_add_favorite(call: ServiceCall) -> ServiceResponse:
+        """Resolve metadata and persist one favorite URL."""
+        playback = get_playback_manager(hass)
+        try:
+            item = await playback.async_add_favorite(call.data[ATTR_URL])
+            items = await playback.async_list_favorites()
+        except Exception as err:
+            raise HomeAssistantError(str(err)) from err
+        return {"count": len(items), "item": item, "items": items}
+
+    async def async_remove_favorite(call: ServiceCall) -> ServiceResponse:
+        """Remove one persistent favorite URL."""
+        playback = get_playback_manager(hass)
+        try:
+            removed = await playback.async_remove_favorite(call.data[ATTR_URL])
+            items = await playback.async_list_favorites()
+        except Exception as err:
+            raise HomeAssistantError(str(err)) from err
+        return {"removed": removed, "count": len(items), "items": items}
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_DOWNLOAD,
@@ -427,6 +461,26 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_SCAN_LIBRARY,
         async_scan_library,
         schema=SCAN_LIBRARY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_LIST_FAVORITES,
+        async_list_favorites,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ADD_FAVORITE,
+        async_add_favorite,
+        schema=FAVORITE_URL_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REMOVE_FAVORITE,
+        async_remove_favorite,
+        schema=FAVORITE_URL_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     return True

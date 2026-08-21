@@ -22,6 +22,9 @@ Tích hợp **YouTube-DLP** cho phép tìm kiếm và tải video hoặc âm tha
 - Thông báo hoàn tất có thể hiển thị tên tệp, loại media, định dạng, chất lượng, dung lượng, đường dẫn lưu, URL nguồn và Job ID tương ứng với từng tác vụ tải.
 - Việc gửi thông báo được thực hiện độc lập với tác vụ tải; lỗi gửi thông báo không làm thay đổi kết quả tải thành công.
 - Toàn bộ cấu hình chính được thực hiện qua giao diện Home Assistant.
+- Có thẻ **YouTube-DLP Media Center** tự đăng ký trong Home Assistant để phát YouTube, điều khiển loa, duyệt thư viện và tải media.
+- Thẻ hỗ trợ lưu **nhạc yêu thích** bền vững trong Home Assistant, có ảnh thu nhỏ, thông tin bài, nút phát và phân trang.
+- Có thể chọn loa mặc định, chỉnh tiêu đề thẻ và chọn 10 mẫu màu ngay trong trình chỉnh sửa UI của thẻ; giao diện tự thích nghi với theme sáng/tối.
 
 ## Cài đặt qua HACS
 
@@ -73,39 +76,3 @@ Việc sử dụng tích hợp phải tuân thủ **Điều khoản dịch vụ 
 Dự án này là một tích hợp độc lập, không phải sản phẩm chính thức và không được YouTube hoặc Google tài trợ, chứng nhận hay liên kết. YouTube có thể thay đổi hệ thống, API, cơ chế phân phối media hoặc biện pháp bảo vệ bất cứ lúc nào, vì vậy khả năng tải xuống có thể thay đổi hoặc ngừng hoạt động mà không báo trước.
 
 Người dùng tự chịu trách nhiệm về cách sử dụng tích hợp và nội dung mình tải xuống. Tác giả/người duy trì dự án không chịu trách nhiệm đối với việc sử dụng sai mục đích, vi phạm bản quyền hoặc điều khoản dịch vụ, hạn chế tài khoản/mạng, mất dữ liệu, gián đoạn dịch vụ hay bất kỳ thiệt hại trực tiếp hoặc gián tiếp nào phát sinh từ việc cài đặt hoặc sử dụng tích hợp này.
-
-## Direct playback and dashboard media card
-
-Version 0.4.4 includes direct audio playback and the dashboard media card without
-changing the normal successful download path. Remote YouTube audio is relayed through
-Home Assistant instead of giving short-lived googlevideo URLs directly to speakers.
-The integration bundles and automatically registers the Lovelace custom card `custom:yt-dlp-media-card`.
-
-The card provides a media-player selector, YouTube URL playback, play/pause,
-stop, previous/next, seek, volume/mute, a searchable local music library, and a
-**Download** top-level view alongside **Media Player**, exposing the same options as `yt_dlp.download`: media type,
-video quality/format, audio format/quality, overwrite, and wait-for-completion.
-The card tracks only a download started from the card, shows progress while that
-job is active, and displays an in-card completion/error notification. The active
-job id is persisted in the browser so tracking can resume after navigating away
-and back. Audio completion also refreshes the library cache.
-
-Download and music-library folders are available from the integration settings (the same gear/options screen as download notifications), so changing paths no longer requires the three-dot Reconfigure flow. The library folder defaults to the download folder.
-Filesystem scanning is performed only when requested by the UI/action and runs in
-Home Assistant's executor with a short cache; it is not scanned during startup.
-
-Automation example:
-
-```yaml
-action: yt_dlp.play
-data:
-  url: "https://www.youtube.com/watch?v=..."
-  media_player: media_player.living_room
-```
-
-For a new dashboard card, choose **YouTube-DLP Media Player** from the custom card
-picker, or use:
-
-```yaml
-type: custom:yt-dlp-media-card
-```
