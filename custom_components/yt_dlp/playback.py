@@ -183,8 +183,17 @@ class PlaybackManager:
             if js_runtimes := self._js_runtime_options():
                 opts["js_runtimes"] = js_runtimes
             if avoid_android_vr:
+                # Do not exclude a possibly sole default client without adding
+                # a concrete alternate. web_embedded is maintained by yt-dlp
+                # as a fallback for android_vr-related extraction failures.
                 opts["extractor_args"] = {
-                    "youtube": {"player_client": ["default", "-android_vr"]}
+                    "youtube": {
+                        "player_client": [
+                            "default",
+                            "web_embedded",
+                            "-android_vr",
+                        ]
+                    }
                 }
 
             try:
@@ -273,11 +282,23 @@ class PlaybackManager:
                 for index in range(len(STREAM_FORMAT_SELECTORS))
                 if index != info.route_index
             )
-            info = await self.async_resolve_stream(
-                url,
-                safe_routes,
-                avoid_android_vr=True,
-            )
+            try:
+                info = await self.async_resolve_stream(
+                    url,
+                    safe_routes,
+                    avoid_android_vr=True,
+                )
+            except Exception as err:  # noqa: BLE001 - keep usable first resolve
+                # The initial resolve already returned a valid direct media URL.
+                # Older yt-dlp builds can have android_vr as their only default
+                # client; a compatibility reroute must never turn that successful
+                # resolve into an immediate service failure. Let the HA relay try
+                # the original stream and use its normal refresh/route fallbacks.
+                _LOGGER.warning(
+                    "Could not pre-resolve a non-android_vr playback route; "
+                    "using the initially resolved stream instead: %s",
+                    err,
+                )
 
         now = time.monotonic()
         self._prune_stream_sessions(now)

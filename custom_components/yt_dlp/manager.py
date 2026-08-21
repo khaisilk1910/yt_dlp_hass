@@ -505,12 +505,20 @@ class YoutubeDlpManager:
             opts["js_runtimes"] = js_runtimes
 
         if avoid_android_vr:
-            # API equivalent of:
-            # --extractor-args "youtube:player_client=default,-android_vr"
-            # Keep this strictly as a retry path; yt-dlp's defaults remain the
-            # first choice and can evolve independently in future releases.
+            # Some yt-dlp releases use android_vr as the *only* default client
+            # when no external JavaScript runtime is available. Excluding it
+            # from ``default`` alone can therefore remove every requested
+            # client and raise "No player clients have been requested".
+            #
+            # web_embedded is yt-dlp's own compatibility fallback for several
+            # android_vr failures. Add it explicitly before excluding
+            # android_vr so this retry always has a concrete alternate client
+            # on yt-dlp versions where android_vr is the sole default. The
+            # normal first attempt still uses untouched yt-dlp defaults.
             opts["extractor_args"] = {
-                "youtube": {"player_client": ["default", "-android_vr"]}
+                "youtube": {
+                    "player_client": ["default", "web_embedded", "-android_vr"]
+                }
             }
 
         if request.media_type == MEDIA_TYPE_AUDIO:
