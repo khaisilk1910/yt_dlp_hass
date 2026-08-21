@@ -36,13 +36,7 @@ from .helpers import detect_javascript_runtime, ensure_writable_directory
 
 _LOGGER = logging.getLogger(__name__)
 _JS_RUNTIME_UNSET = object()
-
-# YouTube changes player-client/PO-token enforcement frequently. Always let the
-# installed yt-dlp choose its current upstream defaults first. Only isolate a
-# client after an actual HTTP 403, then finally retry upstream defaults over
-# IPv4. This avoids freezing old player-client assumptions into the integration.
-_PRIMARY_YOUTUBE_CLIENTS: tuple[str, ...] | None = None
-_FALLBACK_YOUTUBE_CLIENTS = (("web_embedded",), ("default", "web_embedded"))
+_FFMPEG_LOCATION_UNSET = object()
 
 
 @dataclass(slots=True)
@@ -76,6 +70,16 @@ class DownloadJob:
     eta: float | None = None
     final_files: list[str] = field(default_factory=list)
     error: str | None = None
+    metadata_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+
+@dataclass(slots=True)
+class DownloadResult:
+    """Compact result returned by the blocking worker."""
+
+    final_files: list[str]
+    title: str | None
+    final_size: int | None
 
 
 class YoutubeDlpManager:
@@ -86,12 +90,14 @@ class YoutubeDlpManager:
         hass: HomeAssistant,
         entry: ConfigEntry,
         download_path: str,
-        ffmpeg_path: str,
+        ffmpeg_path: str | None,
     ) -> None:
         self.hass = hass
         self.entry = entry
         self.download_path = download_path
         self.ffmpeg_path = ffmpeg_path
+        self._ffmpeg_location: str | None | object = _FFMPEG_LOCATION_UNSET
+        self._ffmpeg_location_lock = threading.Lock()
         self.jobs: dict[str, DownloadJob] = {}
         self._stopping = False
         self._javascript_runtime: tuple[str, str] | None | object = _JS_RUNTIME_UNSET
@@ -119,6 +125,50 @@ class YoutubeDlpManager:
         name, path = runtime
         return {name: {"path": path}}
 
+    def _resolve_ffmpeg_location(self) -> str | None:
+        """Resolve HA's FFmpeg binary hint to an absolute executable path.
+
+        Home Assistant normally exposes the value ``ffmpeg``. Passing that raw
+        value as yt-dlp's ``ffmpeg_location`` is incorrect because yt-dlp treats
+        it as a filesystem path and tests ``os.path.exists("ffmpeg")``. Resolve
+        executable names through PATH first and only pass a real path to yt-dlp.
+        This runs lazily in an executor worker, never during HA startup.
+        """
+        if self._ffmpeg_location is _FFMPEG_LOCATION_UNSET:
+            with self._ffmpeg_location_lock:
+                if self._ffmpeg_location is _FFMPEG_LOCATION_UNSET:
+                    hint = (self.ffmpeg_path or "").strip()
+                    resolved: str | None = None
+
+                    if hint:
+                        if os.path.isabs(hint) or os.path.dirname(hint):
+                            if os.path.isfile(hint):
+                                resolved = os.path.abspath(hint)
+                            elif os.path.isdir(hint):
+                                candidate = shutil.which("ffmpeg", path=hint)
+                                if candidate:
+                                    resolved = os.path.abspath(candidate)
+                        else:
+                            candidate = shutil.which(hint)
+                            if candidate:
+                                resolved = os.path.abspath(candidate)
+
+                    if resolved is None:
+                        candidate = shutil.which("ffmpeg")
+                        if candidate:
+                            resolved = os.path.abspath(candidate)
+
+                    self._ffmpeg_location = resolved
+                    if resolved:
+                        _LOGGER.debug("YouTube-DLP resolved FFmpeg: %s", resolved)
+                    else:
+                        _LOGGER.warning(
+                            "FFmpeg could not be resolved; yt-dlp will try its normal PATH lookup"
+                        )
+
+        value = self._ffmpeg_location
+        return value if isinstance(value, str) else None
+
     async def async_start_download(self, request: DownloadRequest) -> DownloadJob:
         """Start a download in a background task and return its job immediately."""
         if self._stopping:
@@ -141,6 +191,24 @@ class YoutubeDlpManager:
         if job.task is not None:
             await job.task
         return self.job_response(job)
+
+    async def async_wait_for_metadata(
+        self, job: DownloadJob, timeout: float
+    ) -> dict[str, Any]:
+        """Wait briefly for useful response metadata while download continues."""
+        if job.metadata_ready.is_set():
+            return self.job_response(job)
+        try:
+            async with asyncio.timeout(timeout):
+                await job.metadata_ready.wait()
+        except TimeoutError:
+            pass
+        return self.job_response(job)
+
+    def get_job_response(self, job_id: str) -> dict[str, Any] | None:
+        """Return the latest snapshot for a retained job."""
+        job = self.jobs.get(job_id)
+        return self.job_response(job) if job is not None else None
 
     async def _async_run_download(self, job: DownloadJob) -> None:
         """Run one blocking yt-dlp operation in the executor."""
@@ -165,17 +233,25 @@ class YoutubeDlpManager:
             _LOGGER.exception("yt-dlp download job %s failed", job.job_id)
         else:
             job.status = "completed"
-            job.final_files = result
-            job.filename = os.path.basename(result[0]) if result else job.filename
+            job.final_files = result.final_files
+            job.title = result.title or job.title
+            if result.final_files:
+                job.filename = os.path.basename(result.final_files[0])
+            if result.final_size is not None:
+                job.downloaded_bytes = result.final_size
+                job.total_bytes = result.final_size
+            job.speed = job.speed or 0
+            job.eta = 0
             job.error = None
         finally:
+            job.metadata_ready.set()
             # Temp cleanup is owned by the executor worker itself. This avoids
             # deleting fragments underneath a worker if Home Assistant cancels
             # the async wrapper during config-entry unload.
             self._prune_finished_jobs()
             self.async_publish_state()
 
-    def _download_sync(self, job: DownloadJob) -> list[str]:
+    def _download_sync(self, job: DownloadJob) -> DownloadResult:
         """Run one blocking download and always clean its private temp dir."""
         # Do not validate storage during config-entry setup. A NAS/mount may be
         # temporarily offline at HA startup; validate it only when a user asks
@@ -189,7 +265,7 @@ class YoutubeDlpManager:
             # stopped, so cleanup cannot race an in-flight downloader.
             self._cleanup_job_temp(job.job_id)
 
-    def _download_sync_worker(self, job: DownloadJob, job_temp: str) -> list[str]:
+    def _download_sync_worker(self, job: DownloadJob, job_temp: str) -> DownloadResult:
         """Blocking yt-dlp worker implementation. Executor thread only."""
         from yt_dlp import YoutubeDL
         from yt_dlp.utils import DownloadCancelled, DownloadError
@@ -233,55 +309,23 @@ class YoutubeDlpManager:
                 {"status": data.get("status")},
             )
 
-        attempts = (
-            (_PRIMARY_YOUTUBE_CLIENTS, False),
-            (_FALLBACK_YOUTUBE_CLIENTS[0], False),
-            (_FALLBACK_YOUTUBE_CLIENTS[1], True),
+        # Let the installed yt-dlp choose its current upstream YouTube clients.
+        # The v0.2.1 403 fix worked by using a newer yt-dlp release; pinning old
+        # client assumptions here only makes the integration stale faster.
+        os.makedirs(job_temp, exist_ok=True)
+        ydl_opts = self._build_download_options(
+            request,
+            job_temp,
+            progress_hook,
+            postprocessor_hook,
         )
-        info: Mapping[str, Any] | None = None
-        last_error: DownloadError | None = None
+        self.hass.add_job(self._set_job_status, job.job_id, "extracting")
 
-        for attempt_index, (youtube_clients, force_ipv4) in enumerate(attempts, start=1):
-            if job.cancel_event.is_set():
-                raise DownloadCancelled(
-                    "Download cancelled because the integration is unloading"
-                )
-
-            # A retry must not resume fragments created using another YouTube
-            # player client because those signed URLs may no longer be valid.
-            shutil.rmtree(job_temp, ignore_errors=True)
-            os.makedirs(job_temp, exist_ok=True)
-
-            ydl_opts = self._build_download_options(
-                request,
-                job_temp,
-                progress_hook,
-                postprocessor_hook,
-                youtube_clients=youtube_clients,
-                force_ipv4=force_ipv4,
-            )
-            self.hass.add_job(self._set_job_status, job.job_id, "extracting")
-
-            try:
-                with YoutubeDL(ydl_opts) as ydl:
-                    extracted = ydl.extract_info(request.url, download=True)
-                info = extracted if isinstance(extracted, Mapping) else None
-                break
-            except DownloadError as err:
-                last_error = err
-                if "HTTP Error 403" not in str(err) or attempt_index == len(attempts):
-                    raise
-                _LOGGER.warning(
-                    "YouTube returned HTTP 403 for job %s; retrying with player clients %s%s",
-                    job.job_id,
-                    ",".join(attempts[attempt_index][0]),
-                    " over IPv4" if attempts[attempt_index][1] else "",
-                )
-                time.sleep(1)
+        with YoutubeDL(ydl_opts) as ydl:
+            extracted = ydl.extract_info(request.url, download=True)
+        info = extracted if isinstance(extracted, Mapping) else None
 
         if not info:
-            if last_error is not None:
-                raise last_error
             raise DownloadError("yt-dlp did not return media information")
 
         final_files = [
@@ -293,7 +337,16 @@ class YoutubeDlpManager:
             raise DownloadError(
                 "Download finished but the final output file could not be determined"
             )
-        return final_files
+        final_size: int | None = None
+        try:
+            final_size = os.path.getsize(final_files[0])
+        except OSError:
+            pass
+        return DownloadResult(
+            final_files=final_files,
+            title=str(info.get("title")) if info.get("title") else None,
+            final_size=final_size,
+        )
 
     def _build_download_options(
         self,
@@ -301,9 +354,6 @@ class YoutubeDlpManager:
         temp_path: str,
         progress_hook: Any,
         postprocessor_hook: Any,
-        *,
-        youtube_clients: tuple[str, ...] | None = _PRIMARY_YOUTUBE_CLIENTS,
-        force_ipv4: bool = False,
     ) -> dict[str, Any]:
         """Build controlled yt-dlp options from service fields."""
         opts: dict[str, Any] = {
@@ -331,19 +381,11 @@ class YoutubeDlpManager:
             "trim_file_name": 180,
         }
 
-        if youtube_clients is not None:
-            opts["extractor_args"] = {
-                "youtube": {"player_client": list(youtube_clients)},
-            }
-
-        if force_ipv4:
-            # Equivalent to yt-dlp --force-ipv4. This is only used as the last
-            # 403 fallback because forcing IPv4 globally would hurt IPv6-only
-            # installations.
-            opts["source_address"] = "0.0.0.0"
-
-        if self.ffmpeg_path:
-            opts["ffmpeg_location"] = self.ffmpeg_path
+        # Never pass Home Assistant's common raw value "ffmpeg" as
+        # ffmpeg_location. yt-dlp interprets ffmpeg_location as a path and will
+        # disable FFmpeg when that relative path does not exist.
+        if ffmpeg_location := self._resolve_ffmpeg_location():
+            opts["ffmpeg_location"] = ffmpeg_location
 
         if js_runtimes := self._js_runtime_options():
             opts["js_runtimes"] = js_runtimes
@@ -525,10 +567,13 @@ class YoutubeDlpManager:
             job.speed = float(speed) if speed else None
             eta = data.get("eta")
             job.eta = float(eta) if eta is not None else None
+            job.metadata_ready.set()
         elif status == "finished":
             job.status = "postprocessing"
+            job.metadata_ready.set()
         elif status == "error":
             job.status = "error"
+            job.metadata_ready.set()
 
         self.async_publish_state()
 
@@ -641,6 +686,7 @@ class YoutubeDlpManager:
             ]
         except OSError:
             return []
+
         def modified_time(path: Path) -> float:
             try:
                 return path.stat().st_mtime

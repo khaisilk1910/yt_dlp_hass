@@ -1,16 +1,9 @@
-download:
+download_video:
   fields:
     url:
       required: true
       selector:
         text:
-    media_type:
-      default: video
-      selector:
-        select:
-          options:
-            - video
-            - audio
     video_quality:
       default: "1080"
       selector:
@@ -31,6 +24,21 @@ download:
             - mp4
             - mkv
             - webm
+    overwrite:
+      default: false
+      selector:
+        boolean:
+    wait_for_completion:
+      default: false
+      selector:
+        boolean:
+
+download_audio:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
     audio_format:
       default: mp3
       selector:
@@ -60,6 +68,82 @@ download:
       default: false
       selector:
         boolean:
+
+download:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+    media_type:
+      default: video
+      selector:
+        select:
+          options:
+            - video
+            - audio
+    video_options:
+      collapsed: true
+      fields:
+        video_quality:
+          default: "1080"
+          selector:
+            select:
+              options:
+                - best
+                - "2160"
+                - "1440"
+                - "1080"
+                - "720"
+                - "480"
+                - "360"
+        video_format:
+          default: mp4
+          selector:
+            select:
+              options:
+                - mp4
+                - mkv
+                - webm
+    audio_options:
+      collapsed: true
+      fields:
+        audio_format:
+          default: mp3
+          selector:
+            select:
+              options:
+                - mp3
+                - m4a
+                - opus
+                - flac
+                - wav
+        audio_quality:
+          default: "192"
+          selector:
+            select:
+              options:
+                - best
+                - "320"
+                - "256"
+                - "192"
+                - "128"
+                - "96"
+    overwrite:
+      default: false
+      selector:
+        boolean:
+    wait_for_completion:
+      default: false
+      selector:
+        boolean:
+
+get_job:
+  fields:
+    job_id:
+      required: true
+      selector:
+        text:
 
 search:
   fields:

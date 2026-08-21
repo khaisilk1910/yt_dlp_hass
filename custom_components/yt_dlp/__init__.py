@@ -18,6 +18,7 @@ from homeassistant.helpers.typing import ConfigType
 from .const import (
     ATTR_AUDIO_FORMAT,
     ATTR_AUDIO_QUALITY,
+    ATTR_JOB_ID,
     ATTR_LIMIT,
     ATTR_MEDIA_TYPE,
     ATTR_OVERWRITE,
@@ -36,8 +37,14 @@ from .const import (
     DEFAULT_VIDEO_QUALITY,
     DOMAIN,
     MAX_SEARCH_LIMIT,
+    MEDIA_TYPE_AUDIO,
+    MEDIA_TYPE_VIDEO,
     MEDIA_TYPES,
+    RESPONSE_METADATA_TIMEOUT,
     SERVICE_DOWNLOAD,
+    SERVICE_DOWNLOAD_AUDIO,
+    SERVICE_DOWNLOAD_VIDEO,
+    SERVICE_GET_JOB,
     SERVICE_SEARCH,
     STATE_DOWNLOADER,
     VIDEO_FORMATS,
@@ -94,6 +101,40 @@ DOWNLOAD_SCHEMA = vol.Schema(
     }
 )
 
+VIDEO_DOWNLOAD_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_URL): _http_url,
+        vol.Optional(ATTR_VIDEO_QUALITY, default=DEFAULT_VIDEO_QUALITY): vol.In(
+            VIDEO_QUALITIES
+        ),
+        vol.Optional(ATTR_VIDEO_FORMAT, default=DEFAULT_VIDEO_FORMAT): vol.In(
+            VIDEO_FORMATS
+        ),
+        vol.Optional(ATTR_OVERWRITE, default=False): cv.boolean,
+        vol.Optional(ATTR_WAIT_FOR_COMPLETION, default=False): cv.boolean,
+    }
+)
+
+AUDIO_DOWNLOAD_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_URL): _http_url,
+        vol.Optional(ATTR_AUDIO_FORMAT, default=DEFAULT_AUDIO_FORMAT): vol.In(
+            AUDIO_FORMATS
+        ),
+        vol.Optional(ATTR_AUDIO_QUALITY, default=DEFAULT_AUDIO_QUALITY): vol.In(
+            AUDIO_QUALITIES
+        ),
+        vol.Optional(ATTR_OVERWRITE, default=False): cv.boolean,
+        vol.Optional(ATTR_WAIT_FOR_COMPLETION, default=False): cv.boolean,
+    }
+)
+
+GET_JOB_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_JOB_ID): vol.Match(r"^[0-9a-f]{32}$"),
+    }
+)
+
 SEARCH_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_QUERY): _search_query,
@@ -121,33 +162,33 @@ def _get_loaded_manager(hass: HomeAssistant) -> YoutubeDlpManager:
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register actions independently of config entry loading."""
 
-    async def async_download(call: ServiceCall) -> ServiceResponse | None:
+    async def _run_download(
+        call: ServiceCall, request: DownloadRequest
+    ) -> ServiceResponse | None:
         manager = _get_loaded_manager(hass)
-        data = call.data
-        request = DownloadRequest(
-            url=data[ATTR_URL],
-            media_type=data[ATTR_MEDIA_TYPE],
-            video_quality=data[ATTR_VIDEO_QUALITY],
-            video_format=data[ATTR_VIDEO_FORMAT],
-            audio_format=data[ATTR_AUDIO_FORMAT],
-            audio_quality=data[ATTR_AUDIO_QUALITY],
-            overwrite=data[ATTR_OVERWRITE],
-        )
-
         try:
             job = await manager.async_start_download(request)
-            if data[ATTR_WAIT_FOR_COMPLETION]:
+            if call.data[ATTR_WAIT_FOR_COMPLETION]:
                 response = await manager.async_wait_for_job(job)
-                if response["status"] == "error":
-                    raise HomeAssistantError(
-                        translation_domain=DOMAIN,
-                        translation_key="download_failed",
-                        translation_placeholders={
-                            "error": response["error"] or "unknown error"
-                        },
-                    )
+            elif call.return_response:
+                # A returned service response is a snapshot, not a live object.
+                # Wait only until yt-dlp emits its first useful progress metadata
+                # so Developer Tools/response_variable usually gets title, file
+                # name and progress instead of an all-null queued snapshot.
+                response = await manager.async_wait_for_metadata(
+                    job, RESPONSE_METADATA_TIMEOUT
+                )
             else:
                 response = manager.job_response(job)
+
+            if response["status"] == "error":
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="download_failed",
+                    translation_placeholders={
+                        "error": response["error"] or "unknown error"
+                    },
+                )
         except HomeAssistantError:
             raise
         except Exception as err:
@@ -158,6 +199,60 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             ) from err
 
         return response if call.return_response else None
+
+    async def async_download(call: ServiceCall) -> ServiceResponse | None:
+        """Backward-compatible combined video/audio action."""
+        data = call.data
+        request = DownloadRequest(
+            url=data[ATTR_URL],
+            media_type=data[ATTR_MEDIA_TYPE],
+            video_quality=data[ATTR_VIDEO_QUALITY],
+            video_format=data[ATTR_VIDEO_FORMAT],
+            audio_format=data[ATTR_AUDIO_FORMAT],
+            audio_quality=data[ATTR_AUDIO_QUALITY],
+            overwrite=data[ATTR_OVERWRITE],
+        )
+        return await _run_download(call, request)
+
+    async def async_download_video(call: ServiceCall) -> ServiceResponse | None:
+        """Download video with only video-specific fields exposed in the UI."""
+        data = call.data
+        request = DownloadRequest(
+            url=data[ATTR_URL],
+            media_type=MEDIA_TYPE_VIDEO,
+            video_quality=data[ATTR_VIDEO_QUALITY],
+            video_format=data[ATTR_VIDEO_FORMAT],
+            audio_format=DEFAULT_AUDIO_FORMAT,
+            audio_quality=DEFAULT_AUDIO_QUALITY,
+            overwrite=data[ATTR_OVERWRITE],
+        )
+        return await _run_download(call, request)
+
+    async def async_download_audio(call: ServiceCall) -> ServiceResponse | None:
+        """Download audio with only audio-specific fields exposed in the UI."""
+        data = call.data
+        request = DownloadRequest(
+            url=data[ATTR_URL],
+            media_type=MEDIA_TYPE_AUDIO,
+            video_quality=DEFAULT_VIDEO_QUALITY,
+            video_format=DEFAULT_VIDEO_FORMAT,
+            audio_format=data[ATTR_AUDIO_FORMAT],
+            audio_quality=data[ATTR_AUDIO_QUALITY],
+            overwrite=data[ATTR_OVERWRITE],
+        )
+        return await _run_download(call, request)
+
+    async def async_get_job(call: ServiceCall) -> ServiceResponse:
+        """Return the latest snapshot for a background download job."""
+        manager = _get_loaded_manager(hass)
+        response = manager.get_job_response(call.data[ATTR_JOB_ID])
+        if response is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="job_not_found",
+                translation_placeholders={"job_id": call.data[ATTR_JOB_ID]},
+            )
+        return response
 
     async def async_search(call: ServiceCall) -> ServiceResponse:
         manager = _get_loaded_manager(hass)
@@ -184,6 +279,27 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         async_download,
         schema=DOWNLOAD_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DOWNLOAD_VIDEO,
+        async_download_video,
+        schema=VIDEO_DOWNLOAD_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DOWNLOAD_AUDIO,
+        async_download_audio,
+        schema=AUDIO_DOWNLOAD_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_JOB,
+        async_get_job,
+        schema=GET_JOB_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,

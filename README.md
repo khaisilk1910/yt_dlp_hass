@@ -4,13 +4,15 @@ Custom integration for searching YouTube and downloading video/audio with `yt-dl
 
 ## Highlights
 
-- `yt_dlp.download` supports video or audio output, selectable quality and final format.
+- `yt_dlp.download_video` exposes only video options; `yt_dlp.download_audio` exposes only audio options.
+- `yt_dlp.download` remains available for backward compatibility with existing automations.
+- `yt_dlp.get_job` returns the latest retained status/progress for background downloads.
 - `yt_dlp.search` returns title, thumbnail, video URL, duration, channel/uploader and other useful metadata.
 - Download and search work run outside Home Assistant's event loop.
 - `yt-dlp` is imported lazily on the first action through Home Assistant's import helper, so integration setup remains lightweight.
 - Download jobs run in the background by default and are concurrency-limited.
 - Temporary `.part`/fragment files are isolated under `.yt_dlp_tmp/<job_id>` and cleaned after completion/failure.
-- Uses Home Assistant's built-in `ffmpeg` integration and its configured FFmpeg binary.
+- Uses Home Assistant's built-in `ffmpeg` integration as the binary hint, then lazily resolves executable names such as `ffmpeg` to an absolute path before passing them to yt-dlp.
 - The configured download directory and JavaScript runtime are checked lazily only when an action needs them; an unavailable NAS/mount therefore does not block Home Assistant startup.
 - Uses `ConfigEntry.runtime_data`, config-entry-only schema, native service response support and Home Assistant thread-safe job scheduling.
 - Includes `translations/en.json` and `translations/vi.json` for current custom-integration localization.
@@ -39,14 +41,12 @@ HACS therefore installs the source from the selected GitHub release/tag directly
 
 The integration declares these Home Assistant-managed Python requirements:
 
-- `yt-dlp==2026.8.4.234419.dev0`
+- `yt-dlp==2026.8.19`
 - `yt-dlp-ejs==0.8.0`
 
-The pinned yt-dlp build is an upstream PyPI development/nightly build newer than stable `2026.7.4`. yt-dlp itself currently recommends the nightly channel for regular users because website changes can make stable releases stale between monthly releases.
+`2026.8.19` is intentionally restored from the working `v0.2.1_403_fix` baseline instead of pinning the older `2026.8.4...dev0` build used by v0.2.3. The integration lets yt-dlp use its own current YouTube client defaults rather than hard-coding player-client fallbacks.
 
-The integration first lets yt-dlp use its upstream default YouTube clients. Only an actual HTTP 403 triggers controlled fallback attempts, with IPv4 used only on the final retry.
-
-FFmpeg is obtained from Home Assistant's built-in `ffmpeg` integration. A supported JavaScript runtime (Deno, Node, Bun or QuickJS) is detected lazily if one is already present; it is not added as a mandatory package dependency.
+FFmpeg is obtained from Home Assistant's built-in `ffmpeg` integration. Home Assistant commonly exposes its binary as the executable name `ffmpeg`; before yt-dlp receives `ffmpeg_location`, the name is resolved lazily through `PATH` to a real absolute executable path. This avoids yt-dlp interpreting the literal string `ffmpeg` as a missing relative filesystem path. A supported JavaScript runtime (Deno, Node, Bun or QuickJS) is also detected lazily if one is already present.
 
 ## Installation
 
@@ -76,17 +76,16 @@ Go to **Settings -> Devices & services -> Add integration -> YouTube-DLP** and c
 
 The config flow validates that the folder can be created and written. Normal Home Assistant startup does not touch that folder. It is checked again only when a download actually begins.
 
-## Action `yt_dlp.download`
+## Download actions
 
-Downloads start as background jobs unless `wait_for_completion` is enabled.
+### `yt_dlp.download_video`
 
-### Video
+Use this action for video. The Home Assistant form only shows video-specific settings.
 
 ```yaml
-action: yt_dlp.download
+action: yt_dlp.download_video
 data:
   url: "https://www.youtube.com/watch?v=VIDEO_ID"
-  media_type: video
   video_quality: "1080"
   video_format: mp4
   overwrite: false
@@ -96,13 +95,14 @@ Video qualities: `best`, `2160`, `1440`, `1080`, `720`, `480`, `360`.
 
 Final containers: `mp4`, `mkv`, `webm`.
 
-### Audio
+### `yt_dlp.download_audio`
+
+Use this action for audio. The Home Assistant form only shows audio-specific settings.
 
 ```yaml
-action: yt_dlp.download
+action: yt_dlp.download_audio
 data:
   url: "https://www.youtube.com/watch?v=VIDEO_ID"
-  media_type: audio
   audio_format: mp3
   audio_quality: "192"
   overwrite: false
@@ -112,20 +112,25 @@ Audio formats: `mp3`, `m4a`, `opus`, `flac`, `wav`.
 
 Audio quality targets: `best`, `320`, `256`, `192`, `128`, `96` kbps.
 
-### Wait for completion
+### Legacy `yt_dlp.download`
+
+The combined action is kept so existing automations do not break. Home Assistant's native `services.yaml` field filtering can filter service fields from selected entity attributes/features, but it does not provide field-to-field conditional visibility. For that reason a single `media_type` dropdown cannot reliably hide/show unrelated fields using only native service descriptions. Prefer `download_video` or `download_audio`; the legacy combined action groups video/audio options into collapsed sections.
+
+### Response behavior
+
+Downloads still run outside Home Assistant's event loop. If `wait_for_completion: true`, the action waits for the worker and returns a completed result.
 
 ```yaml
-action: yt_dlp.download
+action: yt_dlp.download_audio
 data:
   url: "https://www.youtube.com/watch?v=VIDEO_ID"
-  media_type: audio
   audio_format: m4a
   audio_quality: "256"
   wait_for_completion: true
 response_variable: download_result
 ```
 
-Example response after completion:
+Example completed response:
 
 ```yaml
 job_id: 0123456789abcdef...
@@ -136,14 +141,27 @@ filename: Example [VIDEO_ID].m4a
 downloaded_bytes: 12345678
 total_bytes: 12345678
 progress: 100
-speed: null
-eta: null
+speed: 1234567.0
+eta: 0
 final_files:
   - /media/youtube/Example [VIDEO_ID].m4a
 error: null
 ```
 
-With `wait_for_completion: false`, optional response data returns immediately with a job ID and current state while downloading continues in the background.
+With `wait_for_completion: false`, a call that requests response data waits only briefly for the first useful yt-dlp progress metadata instead of immediately returning an all-null `queued` snapshot. The download continues in the background. Calls that do not request response data still return immediately.
+
+### `yt_dlp.get_job`
+
+Use the returned job ID to read the newest retained snapshot later:
+
+```yaml
+action: yt_dlp.get_job
+data:
+  job_id: "0123456789abcdef0123456789abcdef"
+response_variable: download_status
+```
+
+Finished/error/cancelled jobs are retained in bounded memory (up to 50 finished jobs) so this does not grow without limit.
 
 ## Action `yt_dlp.search`
 
@@ -197,26 +215,26 @@ Because HACS uses the source of the release/tag when `zip_release` is not enable
 Use the included helper:
 
 ```bash
-./scripts/release.sh v0.2.3
+./scripts/release.sh v0.2.4
 ```
 
 It:
 
 1. requires a clean Git working tree;
-2. updates `custom_components/yt_dlp/manifest.json` to `0.2.3`;
+2. updates `custom_components/yt_dlp/manifest.json` to `0.2.4`;
 3. keeps manifest keys in Hassfest order;
 4. compiles Python as a quick local check;
-5. commits `Release v0.2.3`;
-6. creates annotated tag `v0.2.3`.
+5. commits `Release v0.2.4`;
+6. creates annotated tag `v0.2.4`.
 
 Then push:
 
 ```bash
 git push origin main
-git push origin v0.2.3
+git push origin v0.2.4
 ```
 
-`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.2.3`. No fixed `yt_dlp.zip` asset is created.
+`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.2.4`. No fixed `yt_dlp.zip` asset is created.
 
 If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.2.4`, and push that new tag.
 

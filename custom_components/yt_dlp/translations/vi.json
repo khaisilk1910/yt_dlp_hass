@@ -31,17 +31,13 @@
     }
   },
   "services": {
-    "download": {
-      "name": "Tải media",
-      "description": "Bắt đầu tải bằng yt-dlp ở nền và chỉ lưu file media hoàn tất trong thư mục đã cấu hình.",
+    "download_video": {
+      "name": "Tải video",
+      "description": "Tải video và lưu file hoàn tất vào thư mục đã cấu hình. Chỉ hiển thị các tùy chọn video.",
       "fields": {
         "url": {
           "name": "URL",
           "description": "URL video cần tải."
-        },
-        "media_type": {
-          "name": "Loại media",
-          "description": "Tải video hoặc chỉ tách audio."
         },
         "video_quality": {
           "name": "Chất lượng video",
@@ -49,15 +45,7 @@
         },
         "video_format": {
           "name": "Định dạng video",
-          "description": "Container video đầu ra."
-        },
-        "audio_format": {
-          "name": "Định dạng audio",
-          "description": "Định dạng audio đầu ra."
-        },
-        "audio_quality": {
-          "name": "Chất lượng audio",
-          "description": "Bitrate audio mong muốn (kbps) hoặc tốt nhất."
+          "description": "Định dạng file video cuối cùng."
         },
         "overwrite": {
           "name": "Ghi đè",
@@ -65,7 +53,89 @@
         },
         "wait_for_completion": {
           "name": "Chờ hoàn tất",
-          "description": "Action chờ đến khi tải và xử lý xong; Home Assistant vẫn hoạt động bình thường vì công việc chạy ngoài event loop."
+          "description": "Chờ tải và xử lý hậu kỳ hoàn tất trước khi action trả về."
+        }
+      }
+    },
+    "download_audio": {
+      "name": "Tải âm thanh",
+      "description": "Tải âm thanh và lưu file hoàn tất vào thư mục đã cấu hình. Chỉ hiển thị các tùy chọn âm thanh.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "URL video hoặc âm thanh cần tải."
+        },
+        "audio_format": {
+          "name": "Định dạng âm thanh",
+          "description": "Định dạng file âm thanh cuối cùng."
+        },
+        "audio_quality": {
+          "name": "Chất lượng âm thanh",
+          "description": "Bitrate âm thanh mong muốn theo kbps hoặc tốt nhất."
+        },
+        "overwrite": {
+          "name": "Ghi đè",
+          "description": "Ghi đè file đầu ra nếu đã tồn tại."
+        },
+        "wait_for_completion": {
+          "name": "Chờ hoàn tất",
+          "description": "Chờ tải và xử lý hậu kỳ hoàn tất trước khi action trả về."
+        }
+      }
+    },
+    "download": {
+      "name": "Tải media (action gộp cũ)",
+      "description": "Action gộp để tương thích cấu hình cũ. Home Assistant hiện không hỗ trợ ẩn động field của service theo một field khác; hãy dùng Tải video hoặc Tải âm thanh để có biểu mẫu chỉ hiện đúng tùy chọn.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "URL media cần tải."
+        },
+        "media_type": {
+          "name": "Loại media",
+          "description": "Tải video hoặc chỉ tách âm thanh."
+        },
+        "video_quality": {
+          "name": "Chất lượng video",
+          "description": "Chiều cao video tối đa hoặc chất lượng tốt nhất."
+        },
+        "video_format": {
+          "name": "Định dạng video",
+          "description": "Định dạng file video cuối cùng."
+        },
+        "audio_format": {
+          "name": "Định dạng âm thanh",
+          "description": "Định dạng file âm thanh cuối cùng."
+        },
+        "audio_quality": {
+          "name": "Chất lượng âm thanh",
+          "description": "Bitrate âm thanh mong muốn theo kbps hoặc tốt nhất."
+        },
+        "overwrite": {
+          "name": "Ghi đè",
+          "description": "Ghi đè file đầu ra nếu đã tồn tại."
+        },
+        "wait_for_completion": {
+          "name": "Chờ hoàn tất",
+          "description": "Chờ tải và xử lý hậu kỳ hoàn tất trước khi action trả về."
+        }
+      },
+      "sections": {
+        "video_options": {
+          "name": "Tùy chọn video"
+        },
+        "audio_options": {
+          "name": "Tùy chọn âm thanh"
+        }
+      }
+    },
+    "get_job": {
+      "name": "Lấy trạng thái job tải",
+      "description": "Trả về trạng thái và tiến trình mới nhất của một job tải nền còn được lưu trong lịch sử.",
+      "fields": {
+        "job_id": {
+          "name": "Job ID",
+          "description": "Job ID do action tải trả về."
         }
       }
     },
@@ -93,6 +163,9 @@
     },
     "search_failed": {
       "message": "Tìm kiếm YouTube thất bại: {error}"
+    },
+    "job_not_found": {
+      "message": "Không tìm thấy job tải {job_id} hoặc job đã hết thời gian lưu trong lịch sử."
     }
   }
 }

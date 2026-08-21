@@ -13,9 +13,9 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/khaisilk1910/yt_dlp_hass/issues",
   "requirements": [
-    "yt-dlp==2026.8.4.234419.dev0",
+    "yt-dlp==2026.8.19",
     "yt-dlp-ejs==0.8.0"
   ],
   "single_config_entry": true,
-  "version": "0.2.3"
+  "version": "0.2.4"
 }

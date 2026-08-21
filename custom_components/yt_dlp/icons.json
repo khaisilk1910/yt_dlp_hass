@@ -1,6 +1,19 @@
 {
   "services": {
-    "download": {"service": "mdi:download"},
-    "search": {"service": "mdi:magnify"}
+    "download_video": {
+      "service": "mdi:video"
+    },
+    "download_audio": {
+      "service": "mdi:music"
+    },
+    "download": {
+      "service": "mdi:download"
+    },
+    "get_job": {
+      "service": "mdi:progress-download"
+    },
+    "search": {
+      "service": "mdi:magnify"
+    }
   }
 }

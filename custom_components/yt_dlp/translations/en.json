@@ -31,13 +31,65 @@
     }
   },
   "services": {
-    "download": {
-      "name": "Download media",
-      "description": "Starts a YouTube/yt-dlp download in the background and stores only the completed media file in the configured folder.",
+    "download_video": {
+      "name": "Download video",
+      "description": "Downloads a video and stores the completed file in the configured folder. Only video options are shown.",
       "fields": {
         "url": {
           "name": "URL",
           "description": "Video URL to download."
+        },
+        "video_quality": {
+          "name": "Video quality",
+          "description": "Maximum video height, or best available."
+        },
+        "video_format": {
+          "name": "Video format",
+          "description": "Final video container."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Overwrite an existing output file."
+        },
+        "wait_for_completion": {
+          "name": "Wait for completion",
+          "description": "Wait until download and post-processing finish before the action returns."
+        }
+      }
+    },
+    "download_audio": {
+      "name": "Download audio",
+      "description": "Downloads audio and stores the completed file in the configured folder. Only audio options are shown.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Video or audio URL to download."
+        },
+        "audio_format": {
+          "name": "Audio format",
+          "description": "Final audio format."
+        },
+        "audio_quality": {
+          "name": "Audio quality",
+          "description": "Requested audio bitrate in kbps, or best."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Overwrite an existing output file."
+        },
+        "wait_for_completion": {
+          "name": "Wait for completion",
+          "description": "Wait until download and post-processing finish before the action returns."
+        }
+      }
+    },
+    "download": {
+      "name": "Download media (legacy combined)",
+      "description": "Backward-compatible combined action. Home Assistant service descriptions cannot dynamically hide fields based on another service field; use Download video or Download audio for a clean form.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Media URL to download."
         },
         "media_type": {
           "name": "Media type",
@@ -65,7 +117,25 @@
         },
         "wait_for_completion": {
           "name": "Wait for completion",
-          "description": "Keep the action running until download and post-processing finish. Home Assistant remains responsive because the work runs in the executor."
+          "description": "Wait until download and post-processing finish before the action returns."
+        }
+      },
+      "sections": {
+        "video_options": {
+          "name": "Video options"
+        },
+        "audio_options": {
+          "name": "Audio options"
+        }
+      }
+    },
+    "get_job": {
+      "name": "Get download job",
+      "description": "Returns the latest retained status and progress snapshot for a background download job.",
+      "fields": {
+        "job_id": {
+          "name": "Job ID",
+          "description": "Job ID returned by a download action."
         }
       }
     },
@@ -93,6 +163,9 @@
     },
     "search_failed": {
       "message": "The YouTube search failed: {error}"
+    },
+    "job_not_found": {
+      "message": "Download job {job_id} was not found or has expired from retained history."
     }
   }
 }

@@ -7,6 +7,9 @@ DOMAIN = "yt_dlp"
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 
 SERVICE_DOWNLOAD = "download"
+SERVICE_DOWNLOAD_VIDEO = "download_video"
+SERVICE_DOWNLOAD_AUDIO = "download_audio"
+SERVICE_GET_JOB = "get_job"
 SERVICE_SEARCH = "search"
 
 ATTR_URL = "url"
@@ -19,6 +22,7 @@ ATTR_OVERWRITE = "overwrite"
 ATTR_WAIT_FOR_COMPLETION = "wait_for_completion"
 ATTR_QUERY = "query"
 ATTR_LIMIT = "limit"
+ATTR_JOB_ID = "job_id"
 
 MEDIA_TYPE_VIDEO = "video"
 MEDIA_TYPE_AUDIO = "audio"
@@ -44,3 +48,4 @@ CACHE_DIR_NAME = ".yt_dlp_cache"
 MAX_CONCURRENT_DOWNLOADS = 2
 MAX_CONCURRENT_SEARCHES = 2
 MAX_RETAINED_JOBS = 50
+RESPONSE_METADATA_TIMEOUT = 15
