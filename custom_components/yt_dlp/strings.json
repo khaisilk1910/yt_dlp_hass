@@ -1,0 +1,104 @@
+{
+  "title": "YouTube-DLP",
+  "config": {
+    "abort": {
+      "already_configured": "Already configured. Only one YouTube-DLP configuration is supported.",
+      "reconfigure_successful": "Download folder updated."
+    },
+    "error": {
+      "cannot_create_folder": "The download folder cannot be created or is not writable."
+    },
+    "step": {
+      "user": {
+        "title": "YouTube-DLP",
+        "description": "Choose the folder where finished audio/video files will be stored.",
+        "data": {
+          "file_path": "Download folder"
+        },
+        "data_description": {
+          "file_path": "Absolute path where completed audio/video files are stored."
+        }
+      },
+      "reconfigure": {
+        "title": "Change download folder",
+        "data": {
+          "file_path": "Download folder"
+        },
+        "data_description": {
+          "file_path": "Absolute path where completed audio/video files are stored."
+        }
+      }
+    }
+  },
+  "services": {
+    "download": {
+      "name": "Download media",
+      "description": "Starts a YouTube/yt-dlp download in the background and stores only the completed media file in the configured folder.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Video URL to download."
+        },
+        "media_type": {
+          "name": "Media type",
+          "description": "Download video or extract audio only."
+        },
+        "video_quality": {
+          "name": "Video quality",
+          "description": "Maximum video height, or best available."
+        },
+        "video_format": {
+          "name": "Video format",
+          "description": "Final video container."
+        },
+        "audio_format": {
+          "name": "Audio format",
+          "description": "Final audio format."
+        },
+        "audio_quality": {
+          "name": "Audio quality",
+          "description": "Requested audio bitrate in kbps, or best."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Overwrite an existing output file."
+        },
+        "wait_for_completion": {
+          "name": "Wait for completion",
+          "description": "Keep the action running until download and post-processing finish. Home Assistant remains responsive because the work runs in the executor."
+        }
+      }
+    },
+    "search": {
+      "name": "Search YouTube",
+      "description": "Searches YouTube and returns metadata for matching videos.",
+      "fields": {
+        "query": {
+          "name": "Search text",
+          "description": "Song, artist, or other YouTube search text."
+        },
+        "limit": {
+          "name": "Result count",
+          "description": "Number of results to return (1-50)."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_configured": {
+      "message": "YouTube-DLP is not configured or its configuration entry is not loaded."
+    },
+    "ffmpeg_missing": {
+      "message": "FFmpeg was not found. Home Assistant OS and Container include it; Home Assistant Core installations must install FFmpeg on the host."
+    },
+    "download_failed": {
+      "message": "The media download failed: {error}"
+    },
+    "search_failed": {
+      "message": "The YouTube search failed: {error}"
+    },
+    "download_path_unavailable": {
+      "message": "The configured download folder is unavailable or not writable: {error}"
+    }
+  }
+}

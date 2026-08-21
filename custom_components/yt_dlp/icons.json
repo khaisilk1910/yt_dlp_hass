@@ -1,0 +1,6 @@
+{
+  "services": {
+    "download": {"service": "mdi:download"},
+    "search": {"service": "mdi:magnify"}
+  }
+}

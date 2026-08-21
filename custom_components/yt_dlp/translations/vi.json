@@ -1,0 +1,104 @@
+{
+  "title": "YouTube-DLP",
+  "config": {
+    "abort": {
+      "already_configured": "Integration đã được cấu hình. Chỉ hỗ trợ một cấu hình YouTube-DLP.",
+      "reconfigure_successful": "Đã cập nhật thư mục tải xuống."
+    },
+    "error": {
+      "cannot_create_folder": "Không thể tạo thư mục tải xuống hoặc thư mục không có quyền ghi."
+    },
+    "step": {
+      "user": {
+        "title": "YouTube-DLP",
+        "description": "Chọn thư mục lưu các file audio/video đã hoàn tất.",
+        "data": {
+          "file_path": "Thư mục tải xuống"
+        },
+        "data_description": {
+          "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất."
+        }
+      },
+      "reconfigure": {
+        "title": "Đổi thư mục tải xuống",
+        "data": {
+          "file_path": "Thư mục tải xuống"
+        },
+        "data_description": {
+          "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất."
+        }
+      }
+    }
+  },
+  "services": {
+    "download": {
+      "name": "Tải media",
+      "description": "Bắt đầu tải bằng yt-dlp ở nền và chỉ lưu file media hoàn tất trong thư mục đã cấu hình.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "URL video cần tải."
+        },
+        "media_type": {
+          "name": "Loại media",
+          "description": "Tải video hoặc chỉ tách audio."
+        },
+        "video_quality": {
+          "name": "Chất lượng video",
+          "description": "Chiều cao video tối đa hoặc chất lượng tốt nhất."
+        },
+        "video_format": {
+          "name": "Định dạng video",
+          "description": "Container video đầu ra."
+        },
+        "audio_format": {
+          "name": "Định dạng audio",
+          "description": "Định dạng audio đầu ra."
+        },
+        "audio_quality": {
+          "name": "Chất lượng audio",
+          "description": "Bitrate audio mong muốn (kbps) hoặc tốt nhất."
+        },
+        "overwrite": {
+          "name": "Ghi đè",
+          "description": "Ghi đè file đầu ra nếu đã tồn tại."
+        },
+        "wait_for_completion": {
+          "name": "Chờ hoàn tất",
+          "description": "Action chờ đến khi tải và xử lý xong; Home Assistant vẫn hoạt động bình thường vì công việc chạy ngoài event loop."
+        }
+      }
+    },
+    "search": {
+      "name": "Tìm kiếm YouTube",
+      "description": "Tìm kiếm YouTube và trả về metadata của các video phù hợp.",
+      "fields": {
+        "query": {
+          "name": "Nội dung tìm kiếm",
+          "description": "Tên bài hát, ca sĩ hoặc nội dung cần tìm trên YouTube."
+        },
+        "limit": {
+          "name": "Số kết quả",
+          "description": "Số kết quả trả về (1-50)."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_configured": {
+      "message": "YouTube-DLP chưa được cấu hình hoặc config entry chưa được nạp."
+    },
+    "ffmpeg_missing": {
+      "message": "Không tìm thấy FFmpeg. Home Assistant OS và Container đã cài sẵn; bản Home Assistant Core cần cài FFmpeg trên máy chủ."
+    },
+    "download_failed": {
+      "message": "Tải media thất bại: {error}"
+    },
+    "search_failed": {
+      "message": "Tìm kiếm YouTube thất bại: {error}"
+    },
+    "download_path_unavailable": {
+      "message": "Thư mục tải xuống đã cấu hình hiện không khả dụng hoặc không có quyền ghi: {error}"
+    }
+  }
+}

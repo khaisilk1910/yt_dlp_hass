@@ -1,0 +1,77 @@
+download:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+    media_type:
+      default: video
+      selector:
+        select:
+          options:
+            - video
+            - audio
+    video_quality:
+      default: "1080"
+      selector:
+        select:
+          options:
+            - best
+            - "2160"
+            - "1440"
+            - "1080"
+            - "720"
+            - "480"
+            - "360"
+    video_format:
+      default: mp4
+      selector:
+        select:
+          options:
+            - mp4
+            - mkv
+            - webm
+    audio_format:
+      default: mp3
+      selector:
+        select:
+          options:
+            - mp3
+            - m4a
+            - opus
+            - flac
+            - wav
+    audio_quality:
+      default: "192"
+      selector:
+        select:
+          options:
+            - best
+            - "320"
+            - "256"
+            - "192"
+            - "128"
+            - "96"
+    overwrite:
+      default: false
+      selector:
+        boolean:
+    wait_for_completion:
+      default: false
+      selector:
+        boolean:
+
+search:
+  fields:
+    query:
+      required: true
+      selector:
+        text:
+    limit:
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 50
+          step: 1
+          mode: box
