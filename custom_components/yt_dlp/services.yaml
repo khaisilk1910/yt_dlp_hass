@@ -175,6 +175,21 @@ play:
           domain: media_player
           multiple: false
 
+play_multi:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+          type: url
+    media_players:
+      required: true
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: media_player
+
 scan_library:
   fields:
     force:

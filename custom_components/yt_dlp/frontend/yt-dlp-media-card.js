@@ -7,6 +7,7 @@ class YtDlpMediaCard extends HTMLElement {
     this._config = {};
     this._hass = null;
     this._selectedPlayer = "";
+    this._selectedPlayers = [];
     this._view = "player";
     this._tab = "youtube";
     this._youtubeUrl = "";
@@ -71,7 +72,7 @@ class YtDlpMediaCard extends HTMLElement {
       schema: [
         { name: "subtitle", selector: { text: {} } },
         { name: "title", selector: { text: {} } },
-        { name: "media_player", selector: { entity: { filter: { domain: "media_player" } } } },
+        { name: "media_players", selector: { entity: { filter: { domain: "media_player" }, multiple: true, reorder: true } } },
         {
           name: "color_preset",
           selector: {
@@ -85,11 +86,11 @@ class YtDlpMediaCard extends HTMLElement {
       computeLabel: (schema) => ({
         subtitle: "Dòng tiêu đề trên",
         title: "Tiêu đề thẻ",
-        media_player: "Loa mặc định",
+        media_players: "Loa mặc định",
         color_preset: "Mẫu màu",
       })[schema.name],
-      computeHelper: (schema) => schema.name === "media_player"
-        ? "Loa này được chọn mặc định khi thẻ được mở."
+      computeHelper: (schema) => schema.name === "media_players"
+        ? "Có thể chọn một hoặc nhiều loa để phát cùng lúc; loa đầu tiên là loa chính hiển thị trạng thái. Cấu hình media_player cũ vẫn được hỗ trợ."
         : undefined,
     };
   }
@@ -101,25 +102,34 @@ class YtDlpMediaCard extends HTMLElement {
       color_preset: "cyan",
       ...(config || {}),
     };
-    if (this._config.media_player) this._selectedPlayer = this._config.media_player;
+    const configuredPlayers = this._configuredPlayers();
+    if (configuredPlayers.length) {
+      this._selectedPlayers = configuredPlayers;
+      this._selectedPlayer = configuredPlayers[0];
+    }
     this._render();
   }
 
   set hass(hass) {
     const previous = this._hass;
     const previousSelected = this._selectedPlayer;
+    const previousSelection = this._selectedPlayers.join("|");
     const previousState = previous?.states?.[previousSelected];
     const previousPlayers = this._playerSignature(previous);
     this._hass = hass;
     const players = this._players();
-    if (!this._selectedPlayer || !hass.states[this._selectedPlayer]) {
-      const configured = this._config.media_player;
-      this._selectedPlayer = configured && hass.states[configured]
+
+    this._selectedPlayers = this._selectedPlayers.filter((entityId) => Boolean(hass.states[entityId]));
+    if (!this._selectedPlayers.length) {
+      const configured = this._configuredPlayers().filter((entityId) => Boolean(hass.states[entityId]));
+      this._selectedPlayers = configured.length
         ? configured
-        : (players[0]?.entity_id || "");
+        : (players[0]?.entity_id ? [players[0].entity_id] : []);
     }
+    this._selectedPlayer = this._selectedPlayers[0] || "";
+
     const playerChanged = previousState !== hass.states[this._selectedPlayer];
-    const selectionChanged = previousSelected !== this._selectedPlayer;
+    const selectionChanged = previousSelected !== this._selectedPlayer || previousSelection !== this._selectedPlayers.join("|");
     const playersChanged = previousPlayers !== this._playerSignature(hass);
     const shouldRender = !previous || selectionChanged || playersChanged || (this._view === "player" && playerChanged);
     if (shouldRender) this._render();
@@ -151,6 +161,44 @@ class YtDlpMediaCard extends HTMLElement {
     return Object.values(this._hass.states)
       .filter((state) => state.entity_id.startsWith("media_player."))
       .sort((a, b) => this._friendlyName(a).localeCompare(this._friendlyName(b)));
+  }
+
+  _configuredPlayers() {
+    const multi = Array.isArray(this._config?.media_players)
+      ? this._config.media_players
+      : (typeof this._config?.media_players === "string" ? [this._config.media_players] : []);
+    const legacy = Array.isArray(this._config?.media_player)
+      ? this._config.media_player
+      : (typeof this._config?.media_player === "string" ? [this._config.media_player] : []);
+    return [...new Set([...multi, ...legacy].filter((entityId) => typeof entityId === "string" && entityId.startsWith("media_player.")))];
+  }
+
+  _targetPlayers() {
+    if (!this._hass) return [];
+    return [...new Set(this._selectedPlayers)]
+      .filter((entityId) => Boolean(this._hass.states[entityId]));
+  }
+
+  _setSelectedPlayers(entityIds) {
+    let valid = [...new Set(entityIds)]
+      .filter((entityId) => typeof entityId === "string" && this._hass?.states?.[entityId]);
+    if (!valid.length && this._selectedPlayer && this._hass?.states?.[this._selectedPlayer]) {
+      valid = [this._selectedPlayer];
+    }
+    if (this._selectedPlayer && valid.includes(this._selectedPlayer)) {
+      valid = [this._selectedPlayer, ...valid.filter((entityId) => entityId !== this._selectedPlayer)];
+    }
+    this._selectedPlayers = valid;
+    this._selectedPlayer = valid[0] || "";
+    this._nowPlaying = null;
+    this._currentLibraryIndex = -1;
+  }
+
+  _speakerSummary() {
+    const selected = this._targetPlayers();
+    if (!selected.length) return "Chọn loa";
+    if (selected.length === 1) return this._friendlyName(this._hass?.states?.[selected[0]]);
+    return `${this._friendlyName(this._hass?.states?.[selected[0]])} + ${selected.length - 1} loa`;
   }
 
   _playerSignature(hass) {
@@ -436,13 +484,31 @@ class YtDlpMediaCard extends HTMLElement {
 
     const playerView = this._view === "player" ? `
       <div class="speaker-row">
-        <div class="field speaker-field">
-          ${this._icon("speaker")}
-          <select id="speaker" aria-label="Chọn loa">
-            ${players.map((player) => `<option value="${this._escape(player.entity_id)}" ${player.entity_id === this._selectedPlayer ? "selected" : ""}>${this._escape(this._friendlyName(player))}</option>`).join("")}
-          </select>
-          ${this._icon("chevron-down")}
-        </div>
+        <details class="speaker-picker" id="speakerPicker">
+          <summary class="field speaker-field" aria-label="Chọn một hoặc nhiều loa">
+            ${this._icon("speaker-multiple")}
+            <span class="speaker-summary">${this._escape(this._speakerSummary())}</span>
+            <span class="speaker-count">${this._targetPlayers().length}</span>
+            ${this._icon("chevron-down")}
+          </summary>
+          <div class="speaker-menu">
+            <div class="speaker-menu-head">
+              <strong>Phát trên loa</strong>
+              <div>
+                <button type="button" id="selectAllSpeakers">Tất cả</button>
+                <button type="button" id="clearSpeakers">Chỉ loa chính</button>
+              </div>
+            </div>
+            <div class="speaker-options">
+              ${players.map((player) => `
+                <label class="speaker-option">
+                  <input type="checkbox" data-speaker-id="${this._escape(player.entity_id)}" ${this._selectedPlayers.includes(player.entity_id) ? "checked" : ""}>
+                  <span class="speaker-check">${this._icon("check")}</span>
+                  <span class="speaker-name">${this._escape(this._friendlyName(player))}</span>
+                </label>`).join("")}
+            </div>
+          </div>
+        </details>
       </div>
 
       <section class="now-playing">
@@ -568,10 +634,25 @@ class YtDlpMediaCard extends HTMLElement {
 
   _bindEvents() {
     const $ = (id) => this.shadowRoot.getElementById(id);
-    $("speaker")?.addEventListener("change", (event) => {
-      this._selectedPlayer = event.target.value;
-      this._nowPlaying = null;
-      this._currentLibraryIndex = -1;
+    this.shadowRoot.querySelectorAll("[data-speaker-id]").forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        const selected = [...this.shadowRoot.querySelectorAll("[data-speaker-id]:checked")]
+          .map((item) => item.dataset.speakerId);
+        this._setSelectedPlayers(selected);
+        this._render();
+      });
+    });
+    $("selectAllSpeakers")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this._setSelectedPlayers(this._players().map((player) => player.entity_id));
+      this._render();
+    });
+    $("clearSpeakers")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const primary = this._selectedPlayer || this._players()[0]?.entity_id || "";
+      this._setSelectedPlayers(primary ? [primary] : []);
       this._render();
     });
 
@@ -739,16 +820,23 @@ class YtDlpMediaCard extends HTMLElement {
     if (!url) return this._notify("Hãy nhập link YouTube.");
     if (!this._selectedPlayer) return this._notify("Hãy chọn loa trước khi phát.");
 
+    const selectedPlayers = this._targetPlayers();
     this._busy = true;
     this._render();
     try {
-      const response = await this._callServiceResponse("yt_dlp", "play", {
-        url,
-        media_player: this._selectedPlayer,
-      });
+      const response = selectedPlayers.length > 1
+        ? await this._callServiceResponse("yt_dlp", "play_multi", {
+            url,
+            media_players: selectedPlayers,
+          })
+        : await this._callServiceResponse("yt_dlp", "play", {
+            url,
+            media_player: this._selectedPlayer,
+          });
       this._nowPlaying = response || { title: "YouTube audio", url };
       this._currentLibraryIndex = -1;
-      this._notify(`Đang phát: ${response?.title || "YouTube audio"}`);
+      const targetText = selectedPlayers.length > 1 ? ` trên ${selectedPlayers.length} loa` : "";
+      this._notify(`Đang phát${targetText}: ${response?.title || "YouTube audio"}`);
     } catch (error) {
       this._notify(`Không thể phát: ${error?.message || error}`);
     } finally {
@@ -948,6 +1036,9 @@ class YtDlpMediaCard extends HTMLElement {
   }
 
   async _playLibrary(index) {
+    const selectedPlayers = this._targetPlayers();
+    if (selectedPlayers.length > 1) return this._playLibraryMulti(index, selectedPlayers);
+
     const item = this._library[index];
     if (!item || !this._selectedPlayer) return;
     this._busy = true;
@@ -973,6 +1064,32 @@ class YtDlpMediaCard extends HTMLElement {
     }
   }
 
+  async _playLibraryMulti(index, selectedPlayers) {
+    const item = this._library[index];
+    if (!item || !selectedPlayers.length || !this._hass) return;
+    this._busy = true;
+    this._currentLibraryIndex = index;
+    this._nowPlaying = { title: item.title || item.filename, artist: "Thư viện YouTube-DLP", thumbnail: null };
+    this._render();
+    try {
+      await this._hass.callService(
+        "media_player",
+        "play_media",
+        {
+          media_content_id: item.media_content_id,
+          media_content_type: item.mime_type || "music",
+          extra: { metadata: { title: item.title || item.filename } },
+        },
+        { entity_id: selectedPlayers }
+      );
+    } catch (error) {
+      this._notify(`Không thể phát file: ${error?.message || error}`);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
   async _playPause() {
     if (!this._selectedPlayer || this._busy) return;
     const state = this._state();
@@ -981,6 +1098,15 @@ class YtDlpMediaCard extends HTMLElement {
 
   async _callMediaService(service, data = {}) {
     if (!this._selectedPlayer || !this._hass) return;
+    const selectedPlayers = this._targetPlayers();
+    if (selectedPlayers.length > 1) {
+      try {
+        await this._hass.callService("media_player", service, data, { entity_id: selectedPlayers });
+      } catch (error) {
+        this._notify(`Lệnh loa thất bại: ${error?.message || error}`);
+      }
+      return;
+    }
     try {
       await this._hass.callService("media_player", service, data, { entity_id: this._selectedPlayer });
     } catch (error) {
@@ -1073,7 +1199,7 @@ class YtDlpMediaCard extends HTMLElement {
       header{justify-content:space-between;gap:16px}.brand{gap:12px}.brand-icon{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 8px 24px color-mix(in srgb,var(--accent) 30%,transparent)}.brand-icon ha-icon{--mdc-icon-size:26px}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.19em;color:var(--muted)}.brand-title{font-size:18px;font-weight:800;letter-spacing:-.02em}.status{gap:7px;padding:8px 11px;border:1px solid var(--border-soft);border-radius:999px;background:var(--surface-soft);font-size:11px;color:var(--muted)}.status span{width:7px;height:7px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 4px color-mix(in srgb,var(--muted) 12%,transparent)}.is-playing .status span,.status.downloading span{background:#28b77c;box-shadow:0 0 0 4px rgba(40,183,124,.13),0 0 12px rgba(40,183,124,.52)}
       .download-notice{gap:11px;margin-top:16px;padding:12px 13px;border-radius:16px;border:1px solid var(--border);animation:noticeIn .25s ease}.download-notice.success{background:color-mix(in srgb,#28b77c 12%,var(--card-bg));border-color:color-mix(in srgb,#28b77c 34%,transparent)}.download-notice.error{background:color-mix(in srgb,#e84c5b 11%,var(--card-bg));border-color:color-mix(in srgb,#e84c5b 34%,transparent)}.notice-icon{width:36px;height:36px;flex:0 0 36px;border-radius:12px;display:grid;place-items:center;background:var(--surface)}.success .notice-icon{color:#159b63}.error .notice-icon{color:#d63e50}.notice-icon ha-icon{--mdc-icon-size:21px}.notice-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.notice-copy strong{font-size:12px}.notice-copy span{font-size:10px;color:var(--muted);line-height:1.35;overflow-wrap:anywhere}.notice-close{width:30px;height:30px;border:0;border-radius:9px;background:transparent;color:var(--muted);cursor:pointer;display:grid;place-items:center}.notice-close:hover{background:var(--surface);color:var(--text)}.notice-close ha-icon{--mdc-icon-size:17px}
       .primary-tabs{gap:8px;margin-top:18px;padding:6px;border-radius:18px;background:var(--surface-soft);border:1px solid var(--border-soft)}.primary-tabs button{position:relative;flex:1;height:48px;border:0;border-radius:13px;background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;font-size:12px;font-weight:850;letter-spacing:.01em;transition:background .18s ease,color .18s ease,transform .18s ease,box-shadow .18s ease}.primary-tabs button:hover{color:var(--text);background:var(--surface)}.primary-tabs button.active{color:#fff;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 68%,var(--accent)));box-shadow:0 8px 22px color-mix(in srgb,var(--accent) 18%,transparent)}.primary-tabs ha-icon{--mdc-icon-size:21px}.primary-tabs .tab-pulse{position:absolute;right:12px;top:10px}
-      .speaker-row{margin-top:18px}.field{width:100%;height:46px;gap:10px;padding:0 14px;border-radius:15px;border:1px solid var(--border);background:var(--surface-soft)}.field>ha-icon{color:var(--muted);--mdc-icon-size:20px}.field select{appearance:none;flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font-weight:650}.field select option,.input-shell select option{background:var(--card-bg);color:var(--text)}
+      .speaker-row{position:relative;margin-top:18px;z-index:12}.field{width:100%;height:46px;gap:10px;padding:0 14px;border-radius:15px;border:1px solid var(--border);background:var(--surface-soft)}.field>ha-icon{color:var(--muted);--mdc-icon-size:20px}.field select{appearance:none;flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font-weight:650}.field select option,.input-shell select option{background:var(--card-bg);color:var(--text)}.speaker-picker{position:relative;width:100%}.speaker-picker>summary{box-sizing:border-box;display:flex;align-items:center;cursor:pointer;list-style:none;user-select:none}.speaker-picker>summary::-webkit-details-marker{display:none}.speaker-summary{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:12px;font-weight:700}.speaker-count{min-width:22px;height:22px;padding:0 6px;border-radius:999px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 14%,var(--card-bg));color:color-mix(in srgb,var(--accent) 78%,var(--text));font-size:9px;font-weight:850}.speaker-picker[open] .speaker-field{border-color:color-mix(in srgb,var(--accent) 42%,var(--border));box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 9%,transparent)}.speaker-picker[open] .speaker-field>ha-icon:last-child{transform:rotate(180deg)}.speaker-field>ha-icon:last-child{transition:transform .18s ease}.speaker-menu{position:absolute;left:0;right:0;top:calc(100% + 7px);z-index:30;padding:10px;border:1px solid var(--border);border-radius:15px;background:var(--card-bg);box-shadow:0 16px 38px rgba(0,0,0,.24)}.speaker-menu-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 3px 8px}.speaker-menu-head strong{font-size:10px}.speaker-menu-head>div{display:flex;gap:5px}.speaker-menu-head button{height:27px;padding:0 8px;border:1px solid var(--border-soft);border-radius:8px;background:var(--surface-soft);color:var(--muted);font-size:9px;font-weight:750;cursor:pointer}.speaker-menu-head button:hover{color:var(--text);background:var(--surface)}.speaker-options{max-height:230px;overflow:auto;overscroll-behavior:contain}.speaker-option{position:relative;display:flex;align-items:center;gap:9px;min-height:39px;padding:5px 7px;border-radius:10px;cursor:pointer}.speaker-option:hover{background:var(--surface-soft)}.speaker-option input{position:absolute;opacity:0;pointer-events:none}.speaker-check{width:23px;height:23px;flex:0 0 23px;border:1px solid var(--border);border-radius:7px;display:grid;place-items:center;background:var(--surface-soft);color:transparent}.speaker-check ha-icon{--mdc-icon-size:15px}.speaker-option input:checked+.speaker-check{border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}.speaker-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:650;color:var(--text)}
       .now-playing{gap:20px;padding:24px 2px 18px}.art-wrap{position:relative;width:118px;height:118px;flex:0 0 118px;border-radius:28px;padding:4px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 78%,#fff),var(--accent2));box-shadow:0 14px 34px rgba(0,0,0,.2)}.art-wrap.pulse:after{content:"";position:absolute;inset:-7px;border-radius:34px;border:1px solid color-mix(in srgb,var(--accent2) 55%,transparent);animation:ring 2.3s ease-out infinite}.art{width:100%;height:100%;display:grid;place-items:center;border-radius:24px;background:var(--surface-strong);background-size:cover;background-position:center;overflow:hidden}.art>ha-icon{--mdc-icon-size:48px;color:var(--muted)}.track-info{min-width:0;flex:1}.track-title{font-size:24px;font-weight:850;line-height:1.12;letter-spacing:-.035em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.track-subtitle{margin-top:8px;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .transport{padding:4px 2px 8px}.progress-head{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums;margin-bottom:5px}.range{appearance:none;width:100%;height:4px;border-radius:999px;outline:none;background:linear-gradient(90deg,var(--accent) 0 var(--value,0%),var(--surface-strong) var(--value,0%) 100%)}.range::-webkit-slider-thumb{appearance:none;width:14px;height:14px;border-radius:50%;background:var(--text);box-shadow:0 2px 8px rgba(0,0,0,.25);cursor:pointer}.range::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:var(--text);cursor:pointer}.progress{height:5px}.controls{justify-content:center;gap:13px;margin:18px 0 16px}.icon-btn,.play-btn,.soft-btn{border:0;cursor:pointer;display:grid;place-items:center;transition:transform .18s ease,background .18s ease,opacity .18s ease}.icon-btn{width:43px;height:43px;border-radius:50%;background:var(--surface)}.icon-btn:hover,.soft-btn:hover{background:var(--surface-strong);transform:translateY(-1px)}.play-btn{width:62px;height:62px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 10px 28px color-mix(in srgb,var(--accent) 34%,transparent)}.play-btn:hover{transform:scale(1.045)}.play-btn ha-icon{--mdc-icon-size:31px}.busy ha-icon,.spinning ha-icon{animation:spin 1s linear infinite}.volume-row{gap:10px;color:var(--muted)}.volume-row ha-icon{--mdc-icon-size:18px}.volume-row .range{flex:1}.volume-row span{width:36px;text-align:right;font-size:10px;font-variant-numeric:tabular-nums}
       .tabs{gap:7px;margin:16px 0 12px;padding:5px;border-radius:15px;background:var(--surface-soft);border:1px solid var(--border-soft)}.tabs button{position:relative;flex:1;height:38px;border:0;border-radius:11px;background:transparent;color:var(--muted);font-size:12px;font-weight:750;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;min-width:0}.tabs button.active{background:var(--surface-strong);color:var(--text);box-shadow:0 4px 12px rgba(0,0,0,.07)}.tabs ha-icon{--mdc-icon-size:18px}.tabs b{font-size:9px;padding:2px 6px;border-radius:9px;background:var(--surface-strong)}.tab-pulse{width:6px;height:6px;border-radius:50%;background:#34c88a;box-shadow:0 0 10px rgba(52,200,138,.65);animation:pulseDot 1.3s ease-in-out infinite}

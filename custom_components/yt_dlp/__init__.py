@@ -29,6 +29,7 @@ from .const import (
     ATTR_JOB_ID,
     ATTR_LIMIT,
     ATTR_MEDIA_PLAYER,
+    ATTR_MEDIA_PLAYERS,
     ATTR_MEDIA_TYPE,
     ATTR_OVERWRITE,
     ATTR_QUERY,
@@ -58,6 +59,7 @@ from .const import (
     SERVICE_GET_JOB,
     SERVICE_LIST_FAVORITES,
     SERVICE_PLAY,
+    SERVICE_PLAY_MULTI,
     SERVICE_REMOVE_FAVORITE,
     SERVICE_SCAN_LIBRARY,
     SERVICE_SEARCH,
@@ -176,6 +178,32 @@ PLAY_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_URL): _http_url,
         vol.Required(ATTR_MEDIA_PLAYER): _media_player_entity,
+    }
+)
+
+def _media_player_entities(value: object) -> list[str]:
+    """Validate one or more unique media_player entity ids."""
+    raw_items = [value] if isinstance(value, str) else value
+    if not isinstance(raw_items, (list, tuple)):
+        raise vol.Invalid("expected a list of media_player entities")
+
+    entities: list[str] = []
+    for item in raw_items:
+        entity_id = _media_player_entity(item)
+        if entity_id not in entities:
+            entities.append(entity_id)
+
+    if not entities:
+        raise vol.Invalid("at least one media_player entity is required")
+    if len(entities) > 32:
+        raise vol.Invalid("a maximum of 32 media_player entities is supported")
+    return entities
+
+
+PLAY_MULTI_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_URL): _http_url,
+        vol.Required(ATTR_MEDIA_PLAYERS): _media_player_entities,
     }
 )
 
@@ -368,6 +396,51 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         response = {"media_player": entity_id, **info.as_dict()}
         return response if call.return_response else None
 
+    async def async_play_multi(call: ServiceCall) -> ServiceResponse | None:
+        """Resolve one remote stream and start it on multiple HA players."""
+        playback = get_playback_manager(hass)
+        entity_ids = call.data[ATTR_MEDIA_PLAYERS]
+        try:
+            info, media_source_id = await playback.async_create_stream(
+                call.data[ATTR_URL]
+            )
+            metadata: dict[str, object] = {"title": info.title}
+            if info.artist:
+                metadata["artist"] = info.artist
+            if info.thumbnail:
+                metadata["images"] = [{"url": info.thumbnail}]
+
+            # Resolve YouTube once, then let Home Assistant target all selected
+            # players in one service call. The existing single-player service is
+            # intentionally left unchanged.
+            await hass.services.async_call(
+                "media_player",
+                SERVICE_PLAY_MEDIA,
+                service_data={
+                    ATTR_MEDIA_CONTENT_ID: media_source_id,
+                    ATTR_MEDIA_CONTENT_TYPE: info.mime_type,
+                    ATTR_MEDIA_EXTRA: {"metadata": metadata},
+                },
+                target={"entity_id": entity_ids},
+                blocking=True,
+                context=call.context,
+            )
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="play_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+
+        response = {
+            "media_players": entity_ids,
+            "player_count": len(entity_ids),
+            **info.as_dict(),
+        }
+        return response if call.return_response else None
+
     async def async_scan_library(call: ServiceCall) -> ServiceResponse:
         """Scan or return the cached configured local music library."""
         playback = get_playback_manager(hass)
@@ -454,6 +527,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_PLAY,
         async_play,
         schema=PLAY_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PLAY_MULTI,
+        async_play_multi,
+        schema=PLAY_MULTI_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(

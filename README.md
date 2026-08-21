@@ -24,7 +24,7 @@ Tích hợp **YouTube-DLP** cho phép tìm kiếm và tải video hoặc âm tha
 - Toàn bộ cấu hình chính được thực hiện qua giao diện Home Assistant.
 - Có thẻ **YouTube-DLP Media Center** tự đăng ký trong Home Assistant để phát YouTube, điều khiển loa, duyệt thư viện và tải media.
 - Thẻ hỗ trợ lưu **nhạc yêu thích** bền vững trong Home Assistant, có ảnh thu nhỏ, thông tin bài, nút phát và phân trang.
-- Có thể chọn loa mặc định, chỉnh tiêu đề thẻ và chọn 10 mẫu màu ngay trong trình chỉnh sửa UI của thẻ; giao diện tự thích nghi với theme sáng/tối.
+- Có thể chọn một hoặc nhiều loa mặc định để phát cùng lúc, chỉnh tiêu đề thẻ và chọn 10 mẫu màu ngay trong trình chỉnh sửa UI của thẻ; giao diện tự thích nghi với theme sáng/tối.
 
 ## Cài đặt qua HACS
 

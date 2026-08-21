@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 
@@ -13,6 +13,7 @@ SERVICE_DOWNLOAD_AUDIO = "download_audio"
 SERVICE_GET_JOB = "get_job"
 SERVICE_SEARCH = "search"
 SERVICE_PLAY = "play"
+SERVICE_PLAY_MULTI = "play_multi"
 SERVICE_SCAN_LIBRARY = "scan_library"
 SERVICE_LIST_FAVORITES = "list_favorites"
 SERVICE_ADD_FAVORITE = "add_favorite"
@@ -30,6 +31,7 @@ ATTR_QUERY = "query"
 ATTR_LIMIT = "limit"
 ATTR_JOB_ID = "job_id"
 ATTR_MEDIA_PLAYER = "media_player"
+ATTR_MEDIA_PLAYERS = "media_players"
 ATTR_FORCE = "force"
 
 MEDIA_TYPE_VIDEO = "video"
