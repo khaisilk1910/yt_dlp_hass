@@ -76,9 +76,10 @@ Người dùng tự chịu trách nhiệm về cách sử dụng tích hợp và
 
 ## Direct playback and dashboard media card
 
-Version 0.4.3 includes direct audio playback and the dashboard media card without
-changing the existing download worker. The integration bundles and automatically
-registers the Lovelace custom card `custom:yt-dlp-media-card`.
+Version 0.4.4 includes direct audio playback and the dashboard media card without
+changing the normal successful download path. Remote YouTube audio is relayed through
+Home Assistant instead of giving short-lived googlevideo URLs directly to speakers.
+The integration bundles and automatically registers the Lovelace custom card `custom:yt-dlp-media-card`.
 
 The card provides a media-player selector, YouTube URL playback, play/pause,
 stop, previous/next, seek, volume/mute, a searchable local music library, and a

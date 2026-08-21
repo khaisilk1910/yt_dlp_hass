@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from types import ModuleType
+from typing import Any
 
 
 def normalize_download_directory(path: str) -> str:
@@ -54,3 +56,29 @@ def detect_javascript_runtime() -> tuple[str, str] | None:
         if path := shutil.which(executable):
             return runtime, path
     return None
+
+
+def youtube_dl_class(module: ModuleType) -> type[Any]:
+    """Return yt-dlp's public YoutubeDL class without importing its submodule.
+
+    The supported embedding API is ``yt_dlp.YoutubeDL``.  A long-running Python
+    process can occasionally have the package attribute replaced by the already
+    imported ``yt_dlp.YoutubeDL`` module.  Resolve that state defensively while
+    keeping the normal package import path used by the known-good downloader.
+    """
+    candidate = getattr(module, "YoutubeDL", None)
+    if isinstance(candidate, type):
+        return candidate
+
+    nested = getattr(candidate, "YoutubeDL", None)
+    if isinstance(nested, type):
+        # A previous integration version imported ``yt_dlp.YoutubeDL`` as a
+        # submodule. Python then replaces the package attribute with that module,
+        # so later ``from yt_dlp import YoutubeDL`` calls can receive a module
+        # instead of the public class. Restore the public package API in-place;
+        # this also repairs a running HA interpreter after an integration reload.
+        setattr(module, "YoutubeDL", nested)
+        return nested
+
+    raise RuntimeError("yt-dlp YoutubeDL class is unavailable")
+

@@ -66,7 +66,7 @@ from .const import (
 from .helpers import normalize_download_directory
 from .frontend import async_register_media_card
 from .manager import DownloadRequest, YoutubeDlpManager
-from .media_http import YoutubeDlpMediaView
+from .media_http import YoutubeDlpMediaView, YoutubeDlpStreamView
 from .playback import PlaybackManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -212,6 +212,7 @@ def get_playback_manager(hass: HomeAssistant) -> PlaybackManager:
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register actions independently of config entry loading."""
     hass.http.register_view(YoutubeDlpMediaView())
+    hass.http.register_view(YoutubeDlpStreamView())
 
     async def _run_download(
         call: ServiceCall, request: DownloadRequest
@@ -329,7 +330,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         playback = get_playback_manager(hass)
         entity_id = call.data[ATTR_MEDIA_PLAYER]
         try:
-            info = await playback.async_resolve_stream(call.data[ATTR_URL])
+            info, media_source_id = await playback.async_create_stream(
+                call.data[ATTR_URL]
+            )
             metadata: dict[str, object] = {"title": info.title}
             if info.artist:
                 metadata["artist"] = info.artist
@@ -340,7 +343,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 "media_player",
                 SERVICE_PLAY_MEDIA,
                 service_data={
-                    ATTR_MEDIA_CONTENT_ID: info.url,
+                    ATTR_MEDIA_CONTENT_ID: media_source_id,
                     ATTR_MEDIA_CONTENT_TYPE: info.mime_type,
                     ATTR_MEDIA_EXTRA: {"metadata": metadata},
                 },

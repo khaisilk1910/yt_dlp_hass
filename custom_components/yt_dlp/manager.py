@@ -32,7 +32,11 @@ from .const import (
     STATE_DOWNLOADER,
     TEMP_DIR_NAME,
 )
-from .helpers import detect_javascript_runtime, ensure_writable_directory
+from .helpers import (
+    detect_javascript_runtime,
+    ensure_writable_directory,
+    youtube_dl_class,
+)
 from .notifications import async_send_download_notifications
 
 _LOGGER = logging.getLogger(__name__)
@@ -221,8 +225,11 @@ class YoutubeDlpManager:
                 # yt-dlp is intentionally imported lazily so Home Assistant startup
                 # does not pay its import cost. Use HA's import helper so the first
                 # concurrent search/download cannot race CPython's import machinery.
-                await async_import_module(self.hass, "yt_dlp")
-                result = await self.hass.async_add_executor_job(self._download_sync, job)
+                yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
+                youtube_dl_cls = youtube_dl_class(yt_dlp_module)
+                result = await self.hass.async_add_executor_job(
+                    self._download_sync, job, youtube_dl_cls
+                )
         except asyncio.CancelledError:
             job.cancel_event.set()
             job.status = "cancelled"
@@ -264,7 +271,9 @@ class YoutubeDlpManager:
             self._prune_finished_jobs()
             self.async_publish_state()
 
-    def _download_sync(self, job: DownloadJob) -> DownloadResult:
+    def _download_sync(
+        self, job: DownloadJob, youtube_dl_cls: type[Any]
+    ) -> DownloadResult:
         """Run one blocking download and always clean its private temp dir."""
         # Do not validate storage during config-entry setup. A NAS/mount may be
         # temporarily offline at HA startup; validate it only when a user asks
@@ -272,15 +281,16 @@ class YoutubeDlpManager:
         ensure_writable_directory(self.download_path)
         job_temp = os.path.join(self.download_path, TEMP_DIR_NAME, job.job_id)
         try:
-            return self._download_sync_worker(job, job_temp)
+            return self._download_sync_worker(job, job_temp, youtube_dl_cls)
         finally:
             # This executes in the same executor thread after yt-dlp has really
             # stopped, so cleanup cannot race an in-flight downloader.
             self._cleanup_job_temp(job.job_id)
 
-    def _download_sync_worker(self, job: DownloadJob, job_temp: str) -> DownloadResult:
+    def _download_sync_worker(
+        self, job: DownloadJob, job_temp: str, youtube_dl_cls: type[Any]
+    ) -> DownloadResult:
         """Blocking yt-dlp worker implementation. Executor thread only."""
-        from yt_dlp.YoutubeDL import YoutubeDL
         from yt_dlp.utils import DownloadCancelled, DownloadError
 
         request = job.request
@@ -337,54 +347,91 @@ class YoutubeDlpManager:
 
         extracted: Any = None
         last_error: Exception | None = None
-        for attempt, audio_selector in enumerate(audio_selectors, start=1):
-            if job.cancel_event.is_set():
-                raise DownloadCancelled(
-                    "Download cancelled because the integration is unloading"
+
+        # First run is intentionally identical to the known-good 0.4.1 worker:
+        # let yt-dlp 2026.08.19 select its default YouTube clients. Only if the
+        # complete attempt set ends in an HTTP 403 do one clean retry explicitly
+        # excluding android_vr. This is a narrow fallback for stale/contaminated
+        # long-running interpreter state and for upstream client regressions; it
+        # never changes the successful path.
+        for client_fallback in (False, True):
+            last_error = None
+            for attempt, audio_selector in enumerate(audio_selectors, start=1):
+                if job.cancel_event.is_set():
+                    raise DownloadCancelled(
+                        "Download cancelled because the integration is unloading"
+                    )
+
+                # Preserve the known-good worker's temp layout on the normal
+                # path. The extra directory name exists only for the 403 client
+                # fallback, so a successful first pass is behaviorally identical.
+                if client_fallback:
+                    attempt_temp = os.path.join(job_temp, f"safe-attempt-{attempt}")
+                elif len(audio_selectors) > 1:
+                    attempt_temp = os.path.join(job_temp, f"attempt-{attempt}")
+                else:
+                    attempt_temp = job_temp
+                os.makedirs(attempt_temp, exist_ok=True)
+                ydl_opts = self._build_download_options(
+                    request,
+                    attempt_temp,
+                    progress_hook,
+                    postprocessor_hook,
+                    audio_source_selector=audio_selector,
+                    avoid_android_vr=client_fallback,
                 )
 
-            attempt_temp = (
-                os.path.join(job_temp, f"attempt-{attempt}")
-                if len(audio_selectors) > 1
-                else job_temp
-            )
-            os.makedirs(attempt_temp, exist_ok=True)
-            ydl_opts = self._build_download_options(
-                request,
-                attempt_temp,
-                progress_hook,
-                postprocessor_hook,
-                audio_source_selector=audio_selector,
-            )
-
-            try:
-                with YoutubeDL(ydl_opts) as ydl:
-                    extracted = ydl.extract_info(request.url, download=True)
-                last_error = None
-                break
-            except DownloadCancelled:
-                raise
-            except DownloadError as err:
-                last_error = err
-                if not self._should_retry_audio_download(
-                    request, err, attempt, len(audio_selectors)
-                ):
+                try:
+                    with youtube_dl_cls(ydl_opts) as ydl:
+                        extracted = ydl.extract_info(request.url, download=True)
+                    last_error = None
+                    break
+                except DownloadCancelled:
                     raise
+                except DownloadError as err:
+                    last_error = err
+                    if self._should_retry_audio_download(
+                        request, err, attempt, len(audio_selectors)
+                    ):
+                        next_selector = audio_selectors[attempt]
+                        _LOGGER.warning(
+                            "Audio source attempt %s/%s failed for job %s (%s); "
+                            "retrying with fallback selector %s",
+                            attempt,
+                            len(audio_selectors),
+                            job.job_id,
+                            self._short_error(err),
+                            next_selector,
+                        )
+                        shutil.rmtree(attempt_temp, ignore_errors=True)
+                        self.hass.add_job(
+                            self._reset_job_progress_for_retry, job.job_id
+                        )
+                        continue
+                    break
 
-                next_selector = audio_selectors[attempt]
+            if extracted is not None:
+                break
+
+            if (
+                not client_fallback
+                and last_error is not None
+                and self._is_http_403(last_error)
+            ):
                 _LOGGER.warning(
-                    "Audio source attempt %s/%s failed for job %s (%s); "
-                    "retrying with fallback selector %s",
-                    attempt,
-                    len(audio_selectors),
+                    "YouTube returned HTTP 403 for job %s; retrying once with "
+                    "android_vr excluded while preserving the same requested format",
                     job.job_id,
-                    self._short_error(err),
-                    next_selector,
                 )
-                shutil.rmtree(attempt_temp, ignore_errors=True)
+                shutil.rmtree(job_temp, ignore_errors=True)
+                os.makedirs(job_temp, exist_ok=True)
                 self.hass.add_job(self._reset_job_progress_for_retry, job.job_id)
+                continue
 
-        if last_error is not None:
+            if last_error is not None:
+                raise last_error
+
+        if extracted is None and last_error is not None:
             raise last_error
 
         info = extracted if isinstance(extracted, Mapping) else None
@@ -420,6 +467,7 @@ class YoutubeDlpManager:
         postprocessor_hook: Any,
         *,
         audio_source_selector: str | None = None,
+        avoid_android_vr: bool = False,
     ) -> dict[str, Any]:
         """Build controlled yt-dlp options from service fields."""
         opts: dict[str, Any] = {
@@ -455,6 +503,15 @@ class YoutubeDlpManager:
 
         if js_runtimes := self._js_runtime_options():
             opts["js_runtimes"] = js_runtimes
+
+        if avoid_android_vr:
+            # API equivalent of:
+            # --extractor-args "youtube:player_client=default,-android_vr"
+            # Keep this strictly as a retry path; yt-dlp's defaults remain the
+            # first choice and can evolve independently in future releases.
+            opts["extractor_args"] = {
+                "youtube": {"player_client": ["default", "-android_vr"]}
+            }
 
         if request.media_type == MEDIA_TYPE_AUDIO:
             opts.update(self._audio_options(request, audio_source_selector))
@@ -506,6 +563,12 @@ class YoutubeDlpManager:
         """Return one compact log line for a yt-dlp failure."""
         text = " ".join(str(error).split())
         return text[:240]
+
+    @staticmethod
+    def _is_http_403(error: Exception) -> bool:
+        """Return whether yt-dlp reported an upstream HTTP 403 rejection."""
+        message = str(error).casefold()
+        return "http error 403" in message or "403: forbidden" in message
 
     @staticmethod
     def _should_retry_audio_download(
@@ -583,13 +646,16 @@ class YoutubeDlpManager:
         async with self._search_semaphore:
             # Keep the heavy optional dependency out of startup while ensuring
             # thread-safe lazy importing on the first action call.
-            await async_import_module(self.hass, "yt_dlp")
-            return await self.hass.async_add_executor_job(self._search_sync, query, limit)
+            yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
+            youtube_dl_cls = youtube_dl_class(yt_dlp_module)
+            return await self.hass.async_add_executor_job(
+                self._search_sync, query, limit, youtube_dl_cls
+            )
 
-    def _search_sync(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def _search_sync(
+        self, query: str, limit: int, youtube_dl_cls: type[Any]
+    ) -> list[dict[str, Any]]:
         """Blocking YouTube search. Executor thread only."""
-        from yt_dlp.YoutubeDL import YoutubeDL
-
         opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -603,7 +669,7 @@ class YoutubeDlpManager:
         if js_runtimes := self._js_runtime_options():
             opts["js_runtimes"] = js_runtimes
 
-        with YoutubeDL(opts) as ydl:
+        with youtube_dl_cls(opts) as ydl:
             info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
 
         entries = list((info or {}).get("entries") or [])

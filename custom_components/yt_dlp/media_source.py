@@ -22,7 +22,12 @@ from homeassistant.components.media_source import (
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
-from .playback import MEDIA_URL_PREFIX, _mime_from_suffix
+from .playback import (
+    MEDIA_URL_PREFIX,
+    STREAM_MEDIA_SOURCE_PREFIX,
+    STREAM_URL_PREFIX,
+    _mime_from_suffix,
+)
 
 
 async def async_get_media_source(hass: HomeAssistant) -> MediaSource:
@@ -45,6 +50,19 @@ class YoutubeDlpMediaSource(MediaSource):
 
         relative = unquote(item.identifier)
         manager = get_playback_manager(self.hass)
+
+        if relative.startswith(STREAM_MEDIA_SOURCE_PREFIX):
+            token = relative.removeprefix(STREAM_MEDIA_SOURCE_PREFIX)
+            if not token or "/" in token:
+                raise Unresolvable("Invalid playback stream")
+            stream_session = manager.get_stream_session(token)
+            if stream_session is None:
+                raise Unresolvable("Playback stream has expired")
+            return PlayMedia(
+                f"{STREAM_URL_PREFIX}/{token}",
+                stream_session.info.mime_type,
+            )
+
         path = await self.hass.async_add_executor_job(
             manager.resolve_library_file, relative
         )
