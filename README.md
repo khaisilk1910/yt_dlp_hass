@@ -1,33 +1,55 @@
 # YouTube-DLP for Home Assistant
 
-Custom integration for searching YouTube and downloading media with `yt-dlp` from Home Assistant actions.
+Custom integration for searching YouTube and downloading video/audio with `yt-dlp` from Home Assistant actions.
 
-## Main features
+## Highlights
 
-- Downloads run outside the Home Assistant event loop.
-- The `yt_dlp.download` action starts in the background by default, so automations and Home Assistant startup remain responsive.
-- Choose **video** or **audio** in the action UI.
-- Video quality: best, 2160p, 1440p, 1080p, 720p, 480p, 360p.
-- Video container: MP4, MKV, WebM.
-- Audio format: MP3, M4A, Opus, FLAC, WAV.
-- Audio quality: best or a target bitrate.
-- Temporary `.part`/fragment files are isolated in `.yt_dlp_tmp/<job_id>` and removed when a job finishes or fails. The configured download folder receives the final media file.
-- Video output is remuxed to the selected container with FFmpeg when needed, without re-encoding the video stream.
-- `yt_dlp.search` returns structured YouTube search results for use in scripts/automations.
-- `yt_dlp.downloader` keeps the original active-download progress attribute format for compatibility with existing dashboards/cards.
+- `yt_dlp.download` supports video or audio output, selectable quality and final format.
+- `yt_dlp.search` returns title, thumbnail, video URL, duration, channel/uploader and other useful metadata.
+- Download and search work run outside Home Assistant's event loop.
+- `yt-dlp` is imported lazily on the first action through Home Assistant's import helper, so integration setup remains lightweight.
+- Download jobs run in the background by default and are concurrency-limited.
+- Temporary `.part`/fragment files are isolated under `.yt_dlp_tmp/<job_id>` and cleaned after completion/failure.
+- Uses Home Assistant's built-in `ffmpeg` integration and its configured FFmpeg binary.
+- The configured download directory and JavaScript runtime are checked lazily only when an action needs them; an unavailable NAS/mount therefore does not block Home Assistant startup.
+- Uses `ConfigEntry.runtime_data`, config-entry-only schema, native service response support and Home Assistant thread-safe job scheduling.
+- Includes `translations/en.json` and `translations/vi.json` for current custom-integration localization.
+- GitHub tag pushes automatically validate the tagged source and create a GitHub Release. No fixed release ZIP is required by HACS.
+
+## HACS configuration
+
+`hacs.json` intentionally contains only:
+
+```json
+{
+  "name": "Youtube DLP",
+  "render_readme": true
+}
+```
+
+The repository follows HACS' normal integration layout:
+
+```text
+custom_components/yt_dlp/...
+```
+
+HACS therefore installs the source from the selected GitHub release/tag directly. `zip_release`, `filename`, `content_in_root` and fixed ZIP assets are not used.
+
+## Requirements
+
+The integration declares these Home Assistant-managed Python requirements:
+
+- `yt-dlp==2026.8.4.234419.dev0`
+- `yt-dlp-ejs==0.8.0`
+
+The pinned yt-dlp build is an upstream PyPI development/nightly build newer than stable `2026.7.4`. yt-dlp itself currently recommends the nightly channel for regular users because website changes can make stable releases stale between monthly releases.
+
+The integration first lets yt-dlp use its upstream default YouTube clients. Only an actual HTTP 403 triggers controlled fallback attempts, with IPv4 used only on the final retry.
+
+FFmpeg is obtained from Home Assistant's built-in `ffmpeg` integration. A supported JavaScript runtime (Deno, Node, Bun or QuickJS) is detected lazily if one is already present; it is not added as a mandatory package dependency.
 
 ## Installation
 
-## Cài đặt
-
-1. Nhấn nút bên dưới để thêm vào HACS trên Home Assistant.
-
-   [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=khaisilk1910&repository=yt_dlp_hass&category=integration)
-
-   - Sau khi thêm trong HACS và khởi động lại Home Assistant
-     
-   - Vào Settings -> Integrations -> Add integration nhập `Âm lịch Việt Nam` để thêm
-     
 ### HACS
 
 Add this repository as a custom **Integration** repository, install it, then restart Home Assistant.
@@ -50,15 +72,15 @@ and restart Home Assistant.
 
 ## Configuration
 
-Go to **Settings → Devices & services → Add integration → YouTube-DLP** and enter the absolute folder where completed files should be stored.
+Go to **Settings -> Devices & services -> Add integration -> YouTube-DLP** and choose the absolute folder for completed media files.
 
-Home Assistant OS and Home Assistant Container already include FFmpeg. A Home Assistant Core installation must provide `ffmpeg` and `ffprobe` in `PATH`.
+The config flow validates that the folder can be created and written. Normal Home Assistant startup does not touch that folder. It is checked again only when a download actually begins.
 
 ## Action `yt_dlp.download`
 
-The action starts a background job unless `wait_for_completion` is enabled.
+Downloads start as background jobs unless `wait_for_completion` is enabled.
 
-### Video example
+### Video
 
 ```yaml
 action: yt_dlp.download
@@ -70,7 +92,11 @@ data:
   overwrite: false
 ```
 
-### Audio example
+Video qualities: `best`, `2160`, `1440`, `1080`, `720`, `480`, `360`.
+
+Final containers: `mp4`, `mkv`, `webm`.
+
+### Audio
 
 ```yaml
 action: yt_dlp.download
@@ -82,7 +108,11 @@ data:
   overwrite: false
 ```
 
-### Wait for the final file and capture the response
+Audio formats: `mp3`, `m4a`, `opus`, `flac`, `wav`.
+
+Audio quality targets: `best`, `320`, `256`, `192`, `128`, `96` kbps.
+
+### Wait for completion
 
 ```yaml
 action: yt_dlp.download
@@ -95,7 +125,7 @@ data:
 response_variable: download_result
 ```
 
-A completed response contains fields such as:
+Example response after completion:
 
 ```yaml
 job_id: 0123456789abcdef...
@@ -103,17 +133,21 @@ status: completed
 media_type: audio
 title: Example
 filename: Example [VIDEO_ID].m4a
+downloaded_bytes: 12345678
+total_bytes: 12345678
 progress: 100
+speed: null
+eta: null
 final_files:
   - /media/youtube/Example [VIDEO_ID].m4a
 error: null
 ```
 
-With `wait_for_completion: false`, the optional response is returned immediately with a `job_id` and a queued/running status.
+With `wait_for_completion: false`, optional response data returns immediately with a job ID and current state while downloading continues in the background.
 
 ## Action `yt_dlp.search`
 
-Search is metadata-only and uses flat extraction so it does not resolve/download every result.
+Search is metadata-only and uses flat extraction so it does not download or fully resolve every result.
 
 ```yaml
 action: yt_dlp.search
@@ -144,26 +178,51 @@ results:
     live_status: not_live
 ```
 
-`limit` accepts 1–50 results.
+`limit` accepts 1-50 results.
 
 ## Download progress
 
-The compatibility state `yt_dlp.downloader` preserves the original contract:
+For compatibility with existing dashboards/cards, `yt_dlp.downloader` keeps the legacy progress contract:
 
-- state: number of active/queued jobs;
-- each attribute key is an active filename;
+- state = number of active/queued jobs;
+- each active filename is an attribute;
 - each filename contains `speed`, `downloaded`, `total`, and `eta`.
 
-Detailed status, final paths, and errors are returned by the `yt_dlp.download` action when response data is requested. Progress updates are throttled to avoid flooding the Home Assistant event loop. Downloads are also concurrency-limited so multiple automation calls do not exhaust the worker pool.
+Progress is throttled to approximately one update per second. Up to two downloads and two searches run concurrently so repeated automations do not overwhelm Home Assistant's executor/network resources.
 
-## YouTube JavaScript runtime note
+## Automatic GitHub Releases without `zip_release`
 
-Modern `yt-dlp` requires both `yt-dlp-ejs` and a supported external JavaScript runtime for full YouTube format availability. This integration installs the matching `yt-dlp-ejs` package and automatically detects Deno, Node, Bun or QuickJS if one is already available on the host/container.
+Because HACS uses the source of the release/tag when `zip_release` is not enabled, the `manifest.json` version must already match the tag **before the tag is pushed**.
 
-A JavaScript runtime is intentionally **not** a mandatory Python requirement because the official Python Deno package is not compatible with Alpine/musl-based Home Assistant OS/Container environments. Without a runtime, `yt-dlp` can still work in degraded mode, but YouTube may expose fewer formats. The detected runtime is logged when the integration loads; it is not added to the compatibility progress attributes so older dashboard cards continue to work.
+Use the included helper:
+
+```bash
+./scripts/release.sh v0.2.3
+```
+
+It:
+
+1. requires a clean Git working tree;
+2. updates `custom_components/yt_dlp/manifest.json` to `0.2.3`;
+3. keeps manifest keys in Hassfest order;
+4. compiles Python as a quick local check;
+5. commits `Release v0.2.3`;
+6. creates annotated tag `v0.2.3`.
+
+Then push:
+
+```bash
+git push origin main
+git push origin v0.2.3
+```
+
+`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.2.3`. No fixed `yt_dlp.zip` asset is created.
+
+If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.2.4`, and push that new tag.
 
 ## Notes
 
-- The integration deliberately does not accept arbitrary raw `yt-dlp` options from the action. Keeping a controlled schema prevents callers from overriding paths/hooks/post-processors and avoids inconsistent temporary/final file handling.
-- Audio bitrate is a target for FFmpeg conversion; it cannot restore quality that is not present in the source stream.
-- YouTube can change its anti-bot/challenge behavior independently of Home Assistant. Keep this integration and its pinned `yt-dlp` dependency updated when new releases are published.
+- Arbitrary raw yt-dlp options are intentionally not exposed through actions. The controlled schema protects output paths, hooks, post-processors and Home Assistant stability.
+- Audio bitrate is a conversion target; it cannot recreate quality absent from the source stream.
+- Some videos may require authentication or a PO token, and data-center/VPN/IPv6 routes can still be rejected by YouTube. This integration does not bypass access controls.
+- YouTube changes frequently. Advance the pinned yt-dlp build only after verifying the package exists and testing it with the current Home Assistant/Python runtime.

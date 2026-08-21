@@ -20,18 +20,29 @@ from uuid import uuid4
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.importlib import async_import_module
 
 from .const import (
     CACHE_DIR_NAME,
     DEFAULT_FILENAME_TEMPLATE,
     MAX_CONCURRENT_DOWNLOADS,
+    MAX_CONCURRENT_SEARCHES,
     MAX_RETAINED_JOBS,
     MEDIA_TYPE_AUDIO,
     STATE_DOWNLOADER,
     TEMP_DIR_NAME,
 )
+from .helpers import detect_javascript_runtime, ensure_writable_directory
 
 _LOGGER = logging.getLogger(__name__)
+_JS_RUNTIME_UNSET = object()
+
+# YouTube changes player-client/PO-token enforcement frequently. Always let the
+# installed yt-dlp choose its current upstream defaults first. Only isolate a
+# client after an actual HTTP 403, then finally retry upstream defaults over
+# IPv4. This avoids freezing old player-client assumptions into the integration.
+_PRIMARY_YOUTUBE_CLIENTS: tuple[str, ...] | None = None
+_FALLBACK_YOUTUBE_CLIENTS = (("web_embedded",), ("default", "web_embedded"))
 
 
 @dataclass(slots=True)
@@ -75,28 +86,37 @@ class YoutubeDlpManager:
         hass: HomeAssistant,
         entry: ConfigEntry,
         download_path: str,
-        ffmpeg_path: str | None,
-        javascript_runtime: tuple[str, str] | None,
+        ffmpeg_path: str,
     ) -> None:
         self.hass = hass
         self.entry = entry
-        self.download_path = os.path.abspath(os.path.expanduser(download_path))
+        self.download_path = download_path
         self.ffmpeg_path = ffmpeg_path
         self.jobs: dict[str, DownloadJob] = {}
         self._stopping = False
-        self._javascript_runtime = javascript_runtime
+        self._javascript_runtime: tuple[str, str] | None | object = _JS_RUNTIME_UNSET
+        self._javascript_runtime_lock = threading.Lock()
         self._download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-
-    @property
-    def javascript_runtime(self) -> str:
-        """Return the detected JavaScript runtime without touching disk."""
-        return self._javascript_runtime[0] if self._javascript_runtime else "unavailable"
+        self._search_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SEARCHES)
 
     def _js_runtime_options(self) -> dict[str, dict[str, str]] | None:
-        """Build yt-dlp JavaScript runtime options from setup-time detection."""
-        if not self._javascript_runtime:
+        """Lazily detect a yt-dlp JavaScript runtime inside a worker thread."""
+        if self._javascript_runtime is _JS_RUNTIME_UNSET:
+            with self._javascript_runtime_lock:
+                if self._javascript_runtime is _JS_RUNTIME_UNSET:
+                    self._javascript_runtime = detect_javascript_runtime()
+                    if self._javascript_runtime:
+                        _LOGGER.info(
+                            "YouTube-DLP detected JavaScript runtime: %s",
+                            self._javascript_runtime[0],
+                        )
+                    else:
+                        _LOGGER.debug("No external yt-dlp JavaScript runtime detected")
+
+        runtime = self._javascript_runtime
+        if not isinstance(runtime, tuple):
             return None
-        name, path = self._javascript_runtime
+        name, path = runtime
         return {name: {"path": path}}
 
     async def async_start_download(self, request: DownloadRequest) -> DownloadJob:
@@ -129,6 +149,10 @@ class YoutubeDlpManager:
                 if job.cancel_event.is_set():
                     job.status = "cancelled"
                     return
+                # yt-dlp is intentionally imported lazily so Home Assistant startup
+                # does not pay its import cost. Use HA's import helper so the first
+                # concurrent search/download cannot race CPython's import machinery.
+                await async_import_module(self.hass, "yt_dlp")
                 result = await self.hass.async_add_executor_job(self._download_sync, job)
         except asyncio.CancelledError:
             job.cancel_event.set()
@@ -145,46 +169,126 @@ class YoutubeDlpManager:
             job.filename = os.path.basename(result[0]) if result else job.filename
             job.error = None
         finally:
-            await self.hass.async_add_executor_job(self._cleanup_job_temp, job.job_id)
+            # Temp cleanup is owned by the executor worker itself. This avoids
+            # deleting fragments underneath a worker if Home Assistant cancels
+            # the async wrapper during config-entry unload.
             self._prune_finished_jobs()
             self.async_publish_state()
 
     def _download_sync(self, job: DownloadJob) -> list[str]:
-        """Blocking yt-dlp download worker. Executor thread only."""
+        """Run one blocking download and always clean its private temp dir."""
+        # Do not validate storage during config-entry setup. A NAS/mount may be
+        # temporarily offline at HA startup; validate it only when a user asks
+        # for an actual download.
+        ensure_writable_directory(self.download_path)
+        job_temp = os.path.join(self.download_path, TEMP_DIR_NAME, job.job_id)
+        try:
+            return self._download_sync_worker(job, job_temp)
+        finally:
+            # This executes in the same executor thread after yt-dlp has really
+            # stopped, so cleanup cannot race an in-flight downloader.
+            self._cleanup_job_temp(job.job_id)
+
+    def _download_sync_worker(self, job: DownloadJob, job_temp: str) -> list[str]:
+        """Blocking yt-dlp worker implementation. Executor thread only."""
         from yt_dlp import YoutubeDL
         from yt_dlp.utils import DownloadCancelled, DownloadError
 
         request = job.request
-        job_temp = os.path.join(self.download_path, TEMP_DIR_NAME, job.job_id)
-        os.makedirs(job_temp, exist_ok=True)
 
         def progress_hook(data: Mapping[str, Any]) -> None:
             if job.cancel_event.is_set():
-                raise DownloadCancelled("Download cancelled because the integration is unloading")
-            self.hass.loop.call_soon_threadsafe(self._handle_progress, job.job_id, dict(data))
+                raise DownloadCancelled(
+                    "Download cancelled because the integration is unloading"
+                )
+
+            # yt-dlp's progress payload can contain the complete info_dict
+            # (formats, thumbnails, manifests, etc.). Do not queue that large
+            # object onto Home Assistant's event loop every second.
+            info = data.get("info_dict") or {}
+            compact = {
+                "status": data.get("status"),
+                "filename": data.get("filename"),
+                "tmpfilename": data.get("tmpfilename"),
+                "downloaded_bytes": data.get("downloaded_bytes"),
+                "total_bytes": data.get("total_bytes"),
+                "total_bytes_estimate": data.get("total_bytes_estimate"),
+                "speed": data.get("speed"),
+                "eta": data.get("eta"),
+                "title": info.get("title") if isinstance(info, Mapping) else None,
+                "info_filename": (
+                    info.get("filename") if isinstance(info, Mapping) else None
+                ),
+            }
+            self.hass.add_job(self._handle_progress, job.job_id, compact)
 
         def postprocessor_hook(data: Mapping[str, Any]) -> None:
             if job.cancel_event.is_set():
-                raise DownloadCancelled("Download cancelled because the integration is unloading")
-            self.hass.loop.call_soon_threadsafe(
-                self._handle_postprocess_progress, job.job_id, dict(data)
+                raise DownloadCancelled(
+                    "Download cancelled because the integration is unloading"
+                )
+            self.hass.add_job(
+                self._handle_postprocess_progress,
+                job.job_id,
+                {"status": data.get("status")},
             )
 
-        ydl_opts = self._build_download_options(
-            request, job_temp, progress_hook, postprocessor_hook
+        attempts = (
+            (_PRIMARY_YOUTUBE_CLIENTS, False),
+            (_FALLBACK_YOUTUBE_CLIENTS[0], False),
+            (_FALLBACK_YOUTUBE_CLIENTS[1], True),
         )
+        info: Mapping[str, Any] | None = None
+        last_error: DownloadError | None = None
 
-        self.hass.loop.call_soon_threadsafe(self._set_job_status, job.job_id, "extracting")
+        for attempt_index, (youtube_clients, force_ipv4) in enumerate(attempts, start=1):
+            if job.cancel_event.is_set():
+                raise DownloadCancelled(
+                    "Download cancelled because the integration is unloading"
+                )
 
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(request.url, download=True)
+            # A retry must not resume fragments created using another YouTube
+            # player client because those signed URLs may no longer be valid.
+            shutil.rmtree(job_temp, ignore_errors=True)
+            os.makedirs(job_temp, exist_ok=True)
+
+            ydl_opts = self._build_download_options(
+                request,
+                job_temp,
+                progress_hook,
+                postprocessor_hook,
+                youtube_clients=youtube_clients,
+                force_ipv4=force_ipv4,
+            )
+            self.hass.add_job(self._set_job_status, job.job_id, "extracting")
+
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    extracted = ydl.extract_info(request.url, download=True)
+                info = extracted if isinstance(extracted, Mapping) else None
+                break
+            except DownloadError as err:
+                last_error = err
+                if "HTTP Error 403" not in str(err) or attempt_index == len(attempts):
+                    raise
+                _LOGGER.warning(
+                    "YouTube returned HTTP 403 for job %s; retrying with player clients %s%s",
+                    job.job_id,
+                    ",".join(attempts[attempt_index][0]),
+                    " over IPv4" if attempts[attempt_index][1] else "",
+                )
+                time.sleep(1)
 
         if not info:
+            if last_error is not None:
+                raise last_error
             raise DownloadError("yt-dlp did not return media information")
 
         final_files = [
             path for path in self._extract_final_files(info) if os.path.isfile(path)
         ]
+        if not final_files:
+            final_files = self._find_final_files_by_id(info)
         if not final_files:
             raise DownloadError(
                 "Download finished but the final output file could not be determined"
@@ -197,6 +301,9 @@ class YoutubeDlpManager:
         temp_path: str,
         progress_hook: Any,
         postprocessor_hook: Any,
+        *,
+        youtube_clients: tuple[str, ...] | None = _PRIMARY_YOUTUBE_CLIENTS,
+        force_ipv4: bool = False,
     ) -> dict[str, Any]:
         """Build controlled yt-dlp options from service fields."""
         opts: dict[str, Any] = {
@@ -223,6 +330,17 @@ class YoutubeDlpManager:
             "restrictfilenames": False,
             "trim_file_name": 180,
         }
+
+        if youtube_clients is not None:
+            opts["extractor_args"] = {
+                "youtube": {"player_client": list(youtube_clients)},
+            }
+
+        if force_ipv4:
+            # Equivalent to yt-dlp --force-ipv4. This is only used as the last
+            # 403 fallback because forcing IPv4 globally would hurt IPv6-only
+            # installations.
+            opts["source_address"] = "0.0.0.0"
 
         if self.ffmpeg_path:
             opts["ffmpeg_location"] = self.ffmpeg_path
@@ -291,8 +409,14 @@ class YoutubeDlpManager:
         }
 
     async def async_search(self, query: str, limit: int) -> list[dict[str, Any]]:
-        """Search YouTube in the executor and return compact JSON-safe metadata."""
-        return await self.hass.async_add_executor_job(self._search_sync, query, limit)
+        """Search YouTube in a bounded executor worker."""
+        if self._stopping:
+            raise RuntimeError("Integration is unloading")
+        async with self._search_semaphore:
+            # Keep the heavy optional dependency out of startup while ensuring
+            # thread-safe lazy importing on the first action call.
+            await async_import_module(self.hass, "yt_dlp")
+            return await self.hass.async_add_executor_job(self._search_sync, query, limit)
 
     def _search_sync(self, query: str, limit: int) -> list[dict[str, Any]]:
         """Blocking YouTube search. Executor thread only."""
@@ -305,6 +429,8 @@ class YoutubeDlpManager:
             "extract_flat": True,
             "noplaylist": False,
             "lazy_playlist": True,
+            "socket_timeout": 20,
+            "extractor_retries": 2,
         }
         if js_runtimes := self._js_runtime_options():
             opts["js_runtimes"] = js_runtimes
@@ -380,9 +506,12 @@ class YoutubeDlpManager:
         if job is None:
             return
 
-        info = data.get("info_dict") or {}
-        job.title = info.get("title") or job.title
-        filename = data.get("filename") or data.get("tmpfilename") or info.get("filename")
+        job.title = data.get("title") or job.title
+        filename = (
+            data.get("filename")
+            or data.get("tmpfilename")
+            or data.get("info_filename")
+        )
         if filename:
             job.filename = os.path.basename(str(filename))
 
@@ -495,6 +624,32 @@ class YoutubeDlpManager:
                     add(path)
         return files
 
+    def _find_final_files_by_id(self, info: Mapping[str, Any]) -> list[str]:
+        """Fallback final-file lookup when a postprocessor changed the filepath."""
+        video_id = str(info.get("id") or "").strip()
+        if not video_id:
+            return []
+
+        marker = f"[{video_id}]"
+        try:
+            candidates = [
+                path
+                for path in Path(self.download_path).iterdir()
+                if path.is_file()
+                and marker in path.name
+                and not path.name.endswith((".part", ".ytdl"))
+            ]
+        except OSError:
+            return []
+        def modified_time(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        candidates.sort(key=modified_time, reverse=True)
+        return [str(path) for path in candidates if path.exists()]
+
     def _cleanup_job_temp(self, job_id: str) -> None:
         """Remove all .part/fragments for a finished/failed job.
 
@@ -525,6 +680,9 @@ class YoutubeDlpManager:
                     pass
             if pending:
                 _LOGGER.warning(
-                    "%d yt-dlp worker(s) are still stopping in the background",
+                    "%d yt-dlp worker(s) exceeded the shutdown grace period; cancelling HA tasks",
                     len(pending),
                 )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)

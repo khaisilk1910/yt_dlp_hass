@@ -4,107 +4,133 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, for example v0.2.3"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    name: Build and publish release
+    name: Validate and publish release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout tagged source
-        uses: actions/checkout@v7
-
-      - name: Read and validate version from tag
-        id: version
+      - name: Resolve tag
+        id: release
         shell: bash
+        env:
+          INPUT_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="$INPUT_TAG"
           VERSION="${TAG#v}"
-
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ "$TAG" == "$VERSION" || ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid release tag: $TAG"
-            echo "Expected format: vX.Y.Z, for example v0.2.1"
+            echo "Use vX.Y.Z, for example v0.2.3"
             exit 1
           fi
-
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Release version: $VERSION"
 
-      - name: Build Home Assistant package
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
+      - name: Checkout tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tag and manifest version
         shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-
-          rm -rf dist
-          mkdir -p dist/custom_components
-          cp -a custom_components/yt_dlp dist/custom_components/yt_dlp
-
+          git rev-parse --verify "refs/tags/$TAG" >/dev/null
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          manifest_path = Path("dist/custom_components/yt_dlp/manifest.json")
-          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          manifest["version"] = os.environ["VERSION"]
-          manifest_path.write_text(
-              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-              encoding="utf-8",
-          )
-          print(f"manifest version: {manifest['version']}")
+          path = Path("custom_components/yt_dlp/manifest.json")
+          manifest = json.loads(path.read_text(encoding="utf-8"))
+          expected = os.environ["VERSION"]
+          actual = str(manifest.get("version", ""))
+          if actual != expected:
+              raise SystemExit(
+                  f"manifest.json version {actual!r} does not match tag version {expected!r}. "
+                  f"Run ./scripts/release.sh v{expected} to create releases safely."
+              )
+
+          expected_order = [
+              "domain",
+              "name",
+              *sorted(key for key in manifest if key not in {"domain", "name"}),
+          ]
+          if list(manifest) != expected_order:
+              raise SystemExit("manifest.json keys must be domain, name, then alphabetical")
+          print(f"Release source version verified: {actual}")
           PY
 
-          (
-            cd dist
-            zip -r -9 ../yt_dlp.zip custom_components/yt_dlp \
-              -x "*/__pycache__/*" \
-                 "*.pyc" \
-                 "*.pyo" \
-                 "*.DS_Store"
-          )
+      - name: Compile Python
+        run: python3 -m compileall -q custom_components/yt_dlp
 
-      - name: Verify release package
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
+      - name: Validate repository files
         shell: bash
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import yaml
 
-          unzip -t yt_dlp.zip
+          root = Path("custom_components/yt_dlp")
+          for path in root.rglob("*.json"):
+              json.loads(path.read_text(encoding="utf-8"))
+          yaml.safe_load((root / "services.yaml").read_text(encoding="utf-8"))
 
-          test "$(unzip -Z1 yt_dlp.zip | head -n 1)" != ""
-          unzip -Z1 yt_dlp.zip | grep -q '^custom_components/yt_dlp/manifest.json$'
+          hacs = json.loads(Path("hacs.json").read_text(encoding="utf-8"))
+          expected_hacs = {"name": "Youtube DLP", "render_readme": True}
+          if hacs != expected_hacs:
+              raise SystemExit(f"Unexpected hacs.json content: {hacs!r}")
 
-          PACKAGE_VERSION="$(unzip -p yt_dlp.zip custom_components/yt_dlp/manifest.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          if (root / "strings.json").exists():
+              raise SystemExit("Custom integrations must use translations/en.json, not strings.json")
+          if not (root / "translations/en.json").is_file():
+              raise SystemExit("translations/en.json is required")
+          if not (root / "brand/icon.png").is_file():
+              raise SystemExit("brand/icon.png is required")
+          PY
 
-          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
-            echo "Package version mismatch: expected $VERSION, got $PACKAGE_VERSION"
-            exit 1
-          fi
+      - name: Hassfest validation
+        uses: home-assistant/actions/hassfest@master
 
-          if unzip -Z1 yt_dlp.zip | grep -Ev '^custom_components/yt_dlp(/|$)' | grep -q .; then
-            echo "Unexpected files found outside custom_components/yt_dlp"
-            unzip -Z1 yt_dlp.zip
-            exit 1
-          fi
-
-          echo "Package verified successfully: yt_dlp.zip ($VERSION)"
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
 
       - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.tag }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" yt_dlp.zip \
-            --title "$TAG" \
-            --generate-notes \
-            --verify-tag
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG already exists; nothing to create."
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag
+          fi

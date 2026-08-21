@@ -7,14 +7,11 @@ from urllib.parse import urlparse
 
 import voluptuous as vol
 
+from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import CONF_FILE_PATH
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
-from homeassistant.exceptions import (
-    ConfigEntryNotReady,
-    HomeAssistantError,
-    ServiceValidationError,
-)
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
@@ -46,10 +43,15 @@ from .const import (
     VIDEO_FORMATS,
     VIDEO_QUALITIES,
 )
-from .helpers import detect_external_tools, ensure_writable_directory
+from .helpers import normalize_download_directory
 from .manager import DownloadRequest, YoutubeDlpManager
 
 _LOGGER = logging.getLogger(__name__)
+
+# This integration is config-entry only. Defining CONFIG_SCHEMA is required for
+# integrations implementing async_setup and also gives a clear HA error if a
+# user tries to configure the integration from configuration.yaml.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 def _http_url(value: str) -> str:
@@ -75,10 +77,18 @@ DOWNLOAD_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_URL): _http_url,
         vol.Optional(ATTR_MEDIA_TYPE, default=DEFAULT_MEDIA_TYPE): vol.In(MEDIA_TYPES),
-        vol.Optional(ATTR_VIDEO_QUALITY, default=DEFAULT_VIDEO_QUALITY): vol.In(VIDEO_QUALITIES),
-        vol.Optional(ATTR_VIDEO_FORMAT, default=DEFAULT_VIDEO_FORMAT): vol.In(VIDEO_FORMATS),
-        vol.Optional(ATTR_AUDIO_FORMAT, default=DEFAULT_AUDIO_FORMAT): vol.In(AUDIO_FORMATS),
-        vol.Optional(ATTR_AUDIO_QUALITY, default=DEFAULT_AUDIO_QUALITY): vol.In(AUDIO_QUALITIES),
+        vol.Optional(ATTR_VIDEO_QUALITY, default=DEFAULT_VIDEO_QUALITY): vol.In(
+            VIDEO_QUALITIES
+        ),
+        vol.Optional(ATTR_VIDEO_FORMAT, default=DEFAULT_VIDEO_FORMAT): vol.In(
+            VIDEO_FORMATS
+        ),
+        vol.Optional(ATTR_AUDIO_FORMAT, default=DEFAULT_AUDIO_FORMAT): vol.In(
+            AUDIO_FORMATS
+        ),
+        vol.Optional(ATTR_AUDIO_QUALITY, default=DEFAULT_AUDIO_QUALITY): vol.In(
+            AUDIO_QUALITIES
+        ),
         vol.Optional(ATTR_OVERWRITE, default=False): cv.boolean,
         vol.Optional(ATTR_WAIT_FOR_COMPLETION, default=False): cv.boolean,
     }
@@ -114,13 +124,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def async_download(call: ServiceCall) -> ServiceResponse | None:
         manager = _get_loaded_manager(hass)
         data = call.data
-
-        if not manager.ffmpeg_path:
-            raise ServiceValidationError(
-                translation_domain=DOMAIN,
-                translation_key="ffmpeg_missing",
-            )
-
         request = DownloadRequest(
             url=data[ATTR_URL],
             media_type=data[ATTR_MEDIA_TYPE],
@@ -158,7 +161,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async def async_search(call: ServiceCall) -> ServiceResponse:
         manager = _get_loaded_manager(hass)
-        query = call.data[ATTR_QUERY].strip()
+        query = call.data[ATTR_QUERY]
         limit = call.data[ATTR_LIMIT]
         try:
             results = await manager.async_search(query, limit)
@@ -193,33 +196,20 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up one configured download directory."""
-    try:
-        download_path = await hass.async_add_executor_job(
-            ensure_writable_directory, entry.data[CONF_FILE_PATH]
-        )
-    except (OSError, ValueError) as err:
-        raise ConfigEntryNotReady(
-            translation_domain=DOMAIN,
-            translation_key="download_path_unavailable",
-            translation_placeholders={"error": str(err)},
-        ) from err
+    """Set up a config entry without blocking I/O during Home Assistant startup."""
+    # The config flow already validates/writes the path. Do not touch the file
+    # system here: an offline NAS/mount must not stall or fail HA startup.
+    download_path = normalize_download_directory(entry.data[CONF_FILE_PATH])
 
-    ffmpeg_path, javascript_runtime = await hass.async_add_executor_job(
-        detect_external_tools
-    )
-    manager = YoutubeDlpManager(
-        hass, entry, download_path, ffmpeg_path, javascript_runtime
-    )
+    # Reuse Home Assistant's built-in ffmpeg integration/configuration instead
+    # of probing PATH ourselves. The manifest declares ffmpeg as a dependency.
+    ffmpeg_path = get_ffmpeg_manager(hass).binary
+
+    manager = YoutubeDlpManager(hass, entry, download_path, ffmpeg_path)
     entry.runtime_data = manager
     manager.async_publish_state()
 
-    _LOGGER.info(
-        "YouTube-DLP ready: output=%s, ffmpeg=%s, javascript_runtime=%s",
-        download_path,
-        bool(ffmpeg_path),
-        manager.javascript_runtime,
-    )
+    _LOGGER.info("YouTube-DLP ready: output=%s", download_path)
     return True
 
 

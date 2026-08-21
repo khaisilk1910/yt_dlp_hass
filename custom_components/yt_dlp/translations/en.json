@@ -88,17 +88,11 @@
     "not_configured": {
       "message": "YouTube-DLP is not configured or its configuration entry is not loaded."
     },
-    "ffmpeg_missing": {
-      "message": "FFmpeg was not found. Home Assistant OS and Container include it; Home Assistant Core installations must install FFmpeg on the host."
-    },
     "download_failed": {
       "message": "The media download failed: {error}"
     },
     "search_failed": {
       "message": "The YouTube search failed: {error}"
-    },
-    "download_path_unavailable": {
-      "message": "The configured download folder is unavailable or not writable: {error}"
     }
   }
 }

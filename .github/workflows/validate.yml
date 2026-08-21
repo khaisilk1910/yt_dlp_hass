@@ -1,0 +1,78 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compile Python
+        run: python3 -m compileall -q custom_components/yt_dlp
+
+      - name: Validate JSON, YAML and repository layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import yaml
+
+          root = Path("custom_components/yt_dlp")
+          for path in root.rglob("*.json"):
+              json.loads(path.read_text(encoding="utf-8"))
+              print(f"JSON OK: {path}")
+          yaml.safe_load((root / "services.yaml").read_text(encoding="utf-8"))
+
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+          expected_order = [
+              "domain",
+              "name",
+              *sorted(key for key in manifest if key not in {"domain", "name"}),
+          ]
+          if list(manifest) != expected_order:
+              raise SystemExit("manifest.json keys must be domain, name, then alphabetical")
+
+          hacs = json.loads(Path("hacs.json").read_text(encoding="utf-8"))
+          if hacs != {"name": "Youtube DLP", "render_readme": True}:
+              raise SystemExit(f"Unexpected hacs.json content: {hacs!r}")
+
+          if (root / "strings.json").exists():
+              raise SystemExit("Custom integrations must use translations/en.json, not strings.json")
+          if not (root / "translations/en.json").is_file():
+              raise SystemExit("translations/en.json is required")
+          if not (root / "brand/icon.png").is_file():
+              raise SystemExit("brand/icon.png is required")
+          PY
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Hassfest validation
+        uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration

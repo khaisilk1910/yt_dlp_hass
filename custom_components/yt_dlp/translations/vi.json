@@ -88,17 +88,11 @@
     "not_configured": {
       "message": "YouTube-DLP chưa được cấu hình hoặc config entry chưa được nạp."
     },
-    "ffmpeg_missing": {
-      "message": "Không tìm thấy FFmpeg. Home Assistant OS và Container đã cài sẵn; bản Home Assistant Core cần cài FFmpeg trên máy chủ."
-    },
     "download_failed": {
       "message": "Tải media thất bại: {error}"
     },
     "search_failed": {
       "message": "Tìm kiếm YouTube thất bại: {error}"
-    },
-    "download_path_unavailable": {
-      "message": "Thư mục tải xuống đã cấu hình hiện không khả dụng hoặc không có quyền ghi: {error}"
     }
   }
 }
