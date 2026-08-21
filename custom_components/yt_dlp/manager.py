@@ -70,7 +70,6 @@ class DownloadJob:
     speed: float | None = None
     eta: float | None = None
     final_files: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     metadata_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
@@ -82,7 +81,6 @@ class DownloadResult:
     final_files: list[str]
     title: str | None
     final_size: int | None
-    metadata: dict[str, Any]
 
 
 class YoutubeDlpManager:
@@ -237,7 +235,6 @@ class YoutubeDlpManager:
         else:
             job.status = "completed"
             job.final_files = result.final_files
-            job.metadata = result.metadata
             job.title = result.title or job.title
             if result.final_files:
                 job.filename = os.path.basename(result.final_files[0])
@@ -248,19 +245,17 @@ class YoutubeDlpManager:
             job.eta = 0
             job.error = None
 
-            # Notification delivery is intentionally separated from the worker's
-            # success state. A missing phone/Zalo service must never turn a valid
-            # media download into a failed job. Service calls are dispatched with
-            # blocking=False by the notification helper.
-            try:
-                await async_send_download_notifications(
+            # Keep completion notifications fully outside the download worker and
+            # outside wait_for_completion. The media job is already successful at
+            # this point; unavailable notification targets can never change it to
+            # an error or delay the caller waiting for the finished file.
+            self.entry.async_create_background_task(
+                self.hass,
+                async_send_download_notifications(
                     self.hass, self.entry.options, self.job_response(job)
-                )
-            except Exception:  # noqa: BLE001 - notification errors are non-fatal
-                _LOGGER.exception(
-                    "Unexpected completion-notification error for yt-dlp job %s",
-                    job.job_id,
-                )
+                ),
+                f"{STATE_DOWNLOADER}_{job.job_id}_notification",
+            )
         finally:
             job.metadata_ready.set()
             # Temp cleanup is owned by the executor worker itself. This avoids
@@ -415,94 +410,7 @@ class YoutubeDlpManager:
             final_files=final_files,
             title=str(info.get("title")) if info.get("title") else None,
             final_size=final_size,
-            metadata=self._extract_download_metadata(
-                info, request, final_files[0], final_size
-            ),
         )
-
-    @staticmethod
-    def _extract_download_metadata(
-        info: Mapping[str, Any],
-        request: DownloadRequest,
-        final_path: str,
-        final_size: int | None,
-    ) -> dict[str, Any]:
-        """Extract compact JSON-safe metadata for responses and notifications."""
-        duration = info.get("duration")
-        duration_value = (
-            float(duration) if isinstance(duration, (int, float)) else None
-        )
-
-        candidates: list[Mapping[str, Any]] = [info]
-        for key in ("requested_downloads", "requested_formats"):
-            values = info.get(key) or []
-            if isinstance(values, list):
-                candidates.extend(item for item in values if isinstance(item, Mapping))
-
-        video_candidates = (
-            [
-                item
-                for item in candidates
-                if isinstance(item.get("height"), (int, float))
-                and item.get("height")
-            ]
-            if request.media_type != MEDIA_TYPE_AUDIO
-            else []
-        )
-        best_video = max(
-            video_candidates,
-            key=lambda item: float(item.get("height") or 0),
-            default=None,
-        )
-        height = int(best_video.get("height")) if best_video else None
-        width_raw = best_video.get("width") if best_video else None
-        width = int(width_raw) if isinstance(width_raw, (int, float)) else None
-        resolution = f"{width}x{height}" if width and height else None
-
-        if request.media_type == MEDIA_TYPE_AUDIO:
-            quality = (
-                "best"
-                if request.audio_quality == "best"
-                else f"{request.audio_quality} kbps"
-            )
-        elif height:
-            quality = f"{height}p"
-        else:
-            quality = (
-                "best"
-                if request.video_quality == "best"
-                else f"{request.video_quality}p"
-            )
-
-        final_format = Path(final_path).suffix.lstrip(".").lower() or (
-            request.audio_format
-            if request.media_type == MEDIA_TYPE_AUDIO
-            else request.video_format
-        )
-        source_url = info.get("webpage_url") or info.get("original_url") or request.url
-        channel = info.get("channel") or info.get("uploader")
-
-        metadata: dict[str, Any] = {
-            "id": str(info.get("id")) if info.get("id") else None,
-            "source_url": str(source_url) if source_url else request.url,
-            "duration": duration_value,
-            "duration_string": (
-                YoutubeDlpManager._format_duration(duration_value)
-                if duration_value is not None
-                else None
-            ),
-            "channel": str(channel) if channel else None,
-            "uploader": (
-                str(info.get("uploader")) if info.get("uploader") else None
-            ),
-            "format": final_format,
-            "quality": quality,
-            "resolution": resolution,
-            "width": width,
-            "height": height,
-            "file_size_bytes": final_size,
-        }
-        return metadata
 
     def _build_download_options(
         self,
@@ -865,20 +773,49 @@ class YoutubeDlpManager:
             "speed": job.speed,
             "eta": job.eta,
             "final_files": list(job.final_files),
-            "file_size_bytes": job.metadata.get("file_size_bytes"),
-            "format": job.metadata.get("format"),
-            "quality": job.metadata.get("quality"),
-            "duration": job.metadata.get("duration"),
-            "duration_string": job.metadata.get("duration_string"),
-            "resolution": job.metadata.get("resolution"),
-            "width": job.metadata.get("width"),
-            "height": job.metadata.get("height"),
-            "channel": job.metadata.get("channel"),
-            "uploader": job.metadata.get("uploader"),
-            "source_url": job.metadata.get("source_url") or job.request.url,
-            "metadata": dict(job.metadata),
+            # Completion-notification details derived only from information the
+            # stable 0.2.6 download job already owns. No extra yt-dlp extraction,
+            # format probing, HTTP request, or filesystem scan is introduced.
+            "file_size_bytes": (
+                job.total_bytes if job.status == "completed" else None
+            ),
+            "format": YoutubeDlpManager._job_output_format(job),
+            "quality": YoutubeDlpManager._job_quality(job),
+            "source_url": job.request.url,
+            "video_quality": job.request.video_quality,
+            "video_format": job.request.video_format,
+            "audio_format": job.request.audio_format,
+            "audio_quality": job.request.audio_quality,
             "error": job.error,
         }
+
+    @staticmethod
+    def _job_output_format(job: DownloadJob) -> str:
+        """Return the final extension without inspecting media streams."""
+        if job.filename:
+            suffix = Path(job.filename).suffix.lstrip(".").lower()
+            if suffix:
+                return suffix
+        return (
+            job.request.audio_format
+            if job.request.media_type == MEDIA_TYPE_AUDIO
+            else job.request.video_format
+        )
+
+    @staticmethod
+    def _job_quality(job: DownloadJob) -> str:
+        """Return the requested output quality for completion messages."""
+        if job.request.media_type == MEDIA_TYPE_AUDIO:
+            return (
+                "best"
+                if job.request.audio_quality == "best"
+                else f"{job.request.audio_quality} kbps"
+            )
+        return (
+            "best"
+            if job.request.video_quality == "best"
+            else f"{job.request.video_quality}p"
+        )
 
     @staticmethod
     def _extract_final_files(info: Mapping[str, Any]) -> list[str]:

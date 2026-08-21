@@ -90,7 +90,7 @@ Three independent sections are available:
 
 Notifications are sent only after a job reaches `completed`. Delivery uses non-blocking Home Assistant action calls; if a phone/Zalo target is unavailable, the download remains successful and the integration only writes a warning to the log.
 
-The completion payload now also exposes useful final metadata such as final format, quality, file size, duration, resolution, channel/uploader and source URL when yt-dlp provides it. The notification formats are optimized per destination: Markdown for Home Assistant and compact emoji-based plain text for mobile/Zalo.
+The completion payload exposes final filename/path, exact completed file size, requested/final container, requested quality and source URL without performing any extra yt-dlp metadata request. This keeps the 0.2.6 download/403 fallback path untouched. The notification formats are optimized per destination: Markdown for Home Assistant and compact emoji-based plain text for mobile/Zalo.
 
 ## Download actions
 
@@ -168,27 +168,11 @@ final_files:
 file_size_bytes: 12345678
 format: m4a
 quality: 256 kbps
-duration: 295.0
-duration_string: "4:55"
-resolution: null
-width: null
-height: null
-channel: Example Channel
-uploader: Example Channel
 source_url: https://www.youtube.com/watch?v=VIDEO_ID
-metadata:
-  id: VIDEO_ID
-  source_url: https://www.youtube.com/watch?v=VIDEO_ID
-  duration: 295.0
-  duration_string: "4:55"
-  channel: Example Channel
-  uploader: Example Channel
-  format: m4a
-  quality: 256 kbps
-  resolution: null
-  width: null
-  height: null
-  file_size_bytes: 12345678
+video_quality: best
+video_format: mp4
+audio_format: m4a
+audio_quality: "256"
 error: null
 ```
 
@@ -259,26 +243,26 @@ Because HACS uses the source of the release/tag when `zip_release` is not enable
 Use the included helper:
 
 ```bash
-./scripts/release.sh v0.3.0
+./scripts/release.sh v0.3.1
 ```
 
 It:
 
 1. requires a clean Git working tree;
-2. updates `custom_components/yt_dlp/manifest.json` to `0.3.0`;
+2. updates `custom_components/yt_dlp/manifest.json` to `0.3.1`;
 3. keeps manifest keys in Hassfest order;
 4. compiles Python as a quick local check;
-5. commits `Release v0.3.0`;
-6. creates annotated tag `v0.3.0`.
+5. commits `Release v0.3.1`;
+6. creates annotated tag `v0.3.1`.
 
 Then push:
 
 ```bash
 git push origin main
-git push origin v0.3.0
+git push origin v0.3.1
 ```
 
-`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.3.0`. No fixed `yt_dlp.zip` asset is created.
+`.github/workflows/release.yml` then validates that tag and manifest versions match, runs static checks, Hassfest and HACS validation, and creates GitHub Release `v0.3.1`. No fixed `yt_dlp.zip` asset is created.
 
 If a tag already exists from an earlier failed workflow, **do not move the tag to a different commit**. Fix the source, create a new patch version such as `v0.3.1`, and push that new tag.
 
