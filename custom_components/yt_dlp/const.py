@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
-VERSION = "0.5.2"
+VERSION = "0.5.12"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
+STATE_FAVORITES_PLAYBACK = f"{DOMAIN}.favorites_playback"
 
 SERVICE_DOWNLOAD = "download"
 SERVICE_DOWNLOAD_VIDEO = "download_video"
@@ -18,6 +19,11 @@ SERVICE_SCAN_LIBRARY = "scan_library"
 SERVICE_FAVORITES_LIST = "favorites_list"
 SERVICE_FAVORITES_ADD = "favorites_add"
 SERVICE_FAVORITES_REMOVE = "favorites_remove"
+SERVICE_FAVORITES_PLAYBACK_GET = "favorites_playback_get"
+SERVICE_FAVORITES_PLAYBACK_SET = "favorites_playback_set"
+SERVICE_FAVORITES_PLAYBACK_START = "favorites_playback_start"
+SERVICE_FAVORITES_PLAYBACK_SKIP = "favorites_playback_skip"
+SERVICE_FAVORITES_PLAYBACK_STOP = "favorites_playback_stop"
 
 ATTR_URL = "url"
 ATTR_MEDIA_TYPE = "media_type"
@@ -33,6 +39,13 @@ ATTR_JOB_ID = "job_id"
 ATTR_MEDIA_PLAYER = "media_player"
 ATTR_MEDIA_PLAYERS = "media_players"
 ATTR_FORCE = "force"
+ATTR_ONLINE_SELECTED = "online_selected"
+ATTR_OFFLINE_SELECTED = "offline_selected"
+ATTR_REPEAT_MODE = "repeat_mode"
+ATTR_KIND = "kind"
+ATTR_QUEUE = "queue"
+ATTR_REPLACE_SELECTION = "replace_selection"
+ATTR_DIRECTION = "direction"
 
 MEDIA_TYPE_VIDEO = "video"
 MEDIA_TYPE_AUDIO = "audio"

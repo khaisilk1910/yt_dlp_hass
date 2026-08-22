@@ -215,3 +215,72 @@ favorites_remove:
       selector:
         text:
           type: url
+
+favorites_playback_get:
+  fields: {}
+
+favorites_playback_set:
+  fields:
+    online_selected:
+      required: true
+      selector:
+        object:
+    offline_selected:
+      required: true
+      selector:
+        object:
+    repeat_mode:
+      required: true
+      selector:
+        select:
+          options:
+            - off
+            - one
+            - all
+
+favorites_playback_start:
+  fields:
+    kind:
+      required: true
+      selector:
+        select:
+          options:
+            - online
+            - offline
+    queue:
+      required: true
+      selector:
+        object:
+    media_players:
+      required: true
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: media_player
+    repeat_mode:
+      required: true
+      selector:
+        select:
+          options:
+            - off
+            - one
+            - all
+    replace_selection:
+      default: true
+      selector:
+        boolean:
+
+favorites_playback_skip:
+  fields:
+    direction:
+      required: true
+      selector:
+        select:
+          options:
+            - previous
+            - next
+            - current
+
+favorites_playback_stop:
+  fields: {}
