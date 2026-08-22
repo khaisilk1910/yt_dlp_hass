@@ -19,8 +19,11 @@ import time
 from typing import Any
 from urllib.parse import quote
 
+from aiohttp import ClientError, ClientTimeout
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.importlib import async_import_module
 
 from .helpers import (
@@ -53,6 +56,16 @@ STREAM_URL_PREFIX = "/api/yt_dlp/stream"
 STREAM_MEDIA_SOURCE_PREFIX = "__stream__/"
 STREAM_SESSION_TTL_SECONDS = 8 * 60 * 60
 MAX_STREAM_SESSIONS = 32
+_STREAM_PROBE_TIMEOUT = ClientTimeout(
+    total=20, connect=10, sock_connect=10, sock_read=10
+)
+_STREAM_PROBE_OK = frozenset({200, 206})
+_STREAM_PROBE_SWITCH_CLIENT = frozenset({401, 403, 404, 410})
+YOUTUBE_CLIENT_FALLBACKS: tuple[tuple[str, ...] | None, ...] = (
+    None,
+    ("android_vr",),
+    ("web_embedded",),
+)
 
 # Keep separate routes. A slash selector only falls back when a format is absent;
 # it does not switch routes when a selected YouTube media URL later returns 403.
@@ -77,7 +90,7 @@ class StreamInfo:
     webpage_url: str
     http_headers: dict[str, str]
     route_index: int
-    avoid_android_vr: bool
+    player_clients: tuple[str, ...] | None
 
     def as_dict(self) -> dict[str, Any]:
         """Return only user-facing, JSON-safe response data."""
@@ -142,7 +155,7 @@ class PlaybackManager:
         url: str,
         route_indexes: tuple[int, ...] | None = None,
         *,
-        avoid_android_vr: bool = False,
+        player_clients: tuple[str, ...] | None = None,
     ) -> StreamInfo:
         """Resolve one usable upstream route without downloading the media."""
         indexes = route_indexes or tuple(range(len(STREAM_FORMAT_SELECTORS)))
@@ -154,7 +167,7 @@ class PlaybackManager:
                 url,
                 youtube_dl_cls,
                 indexes,
-                avoid_android_vr,
+                player_clients,
             )
 
     def _resolve_stream_sync(
@@ -162,7 +175,7 @@ class PlaybackManager:
         url: str,
         youtube_dl_cls: type[Any],
         route_indexes: tuple[int, ...],
-        avoid_android_vr: bool,
+        player_clients: tuple[str, ...] | None,
     ) -> StreamInfo:
         """Blocking yt-dlp metadata extraction. Executor thread only."""
         from yt_dlp.utils import DownloadError
@@ -184,14 +197,12 @@ class PlaybackManager:
             }
             if js_runtimes := self._js_runtime_options():
                 opts["js_runtimes"] = js_runtimes
-            if avoid_android_vr:
-                # Keep yt-dlp's own current default client selection and only
-                # remove android_vr. This is deliberately better than pinning
-                # visionos/web_embedded: the available formats and fallback
-                # clients vary by video, authentication state and JS runtime.
-                # yt-dlp 2026.08.19 explicitly supports ``default,-CLIENT``.
+            if player_clients:
+                # Use only positive client names. A negative/default expression
+                # can become an empty set when yt-dlp changes its default client
+                # preset, which produces "No player clients have been requested".
                 opts["extractor_args"] = {
-                    "youtube": {"player_client": ["default", "-android_vr"]}
+                    "youtube": {"player_client": list(player_clients)}
                 }
 
             try:
@@ -254,7 +265,7 @@ class PlaybackManager:
                         webpage_url=webpage_url,
                         http_headers=headers,
                         route_index=route_index,
-                        avoid_android_vr=avoid_android_vr,
+                        player_clients=player_clients,
                     )
             except DownloadError as err:
                 last_error = err
@@ -264,16 +275,12 @@ class PlaybackManager:
         raise DownloadError("No supported playback route is available")
 
     async def async_create_stream(self, url: str) -> tuple[StreamInfo, str]:
-        """Create a Home Assistant Media Source ID for one remote stream."""
-        info = await self.async_resolve_stream(url)
-
-        # Do not pre-emptively re-resolve merely because the selected GoogleVideo
-        # URL contains ``c=ANDROID_VR``. yt-dlp/YouTube can expose a client marker
-        # that does not reliably identify the extractor route, and the v0.4.7
-        # eager fallback could turn an otherwise usable stream into
-        # "Requested format is not available" before Home Assistant even called
-        # media_player.play_media. The relay below already tests the real upstream
-        # response and only changes client/format after an actual rejection.
+        """Create a Home Assistant Media Source ID for one verified remote stream."""
+        # Verify the selected GoogleVideo URL from Home Assistant before handing
+        # it to Cast. YouTube increasingly rejects some client/format URLs with
+        # HTTP 403. A one-byte range probe lets us switch to a positive, known
+        # fallback client before the receiver sees a broken media URL.
+        info = await self._async_resolve_playable_stream(url)
 
         now = time.monotonic()
         self._prune_stream_sessions(now)
@@ -290,6 +297,79 @@ class PlaybackManager:
         )
         return info, f"media-source://yt_dlp/{STREAM_MEDIA_SOURCE_PREFIX}{token}"
 
+    async def _async_resolve_playable_stream(self, url: str) -> StreamInfo:
+        """Resolve and probe a stream using bounded client/format fallbacks."""
+        last_error: Exception | None = None
+
+        for player_clients in YOUTUBE_CLIENT_FALLBACKS:
+            switch_client = False
+            for route_index in range(len(STREAM_FORMAT_SELECTORS)):
+                try:
+                    info = await self.async_resolve_stream(
+                        url,
+                        (route_index,),
+                        player_clients=player_clients,
+                    )
+                except Exception as err:  # noqa: BLE001 - yt-dlp raises several public errors
+                    last_error = err
+                    if _no_player_clients_error(err):
+                        switch_client = True
+                        break
+                    continue
+
+                try:
+                    status = await self._async_probe_stream(info)
+                except (ClientError, TimeoutError, OSError) as err:
+                    last_error = err
+                    continue
+
+                if status in _STREAM_PROBE_OK:
+                    return info
+
+                last_error = RuntimeError(
+                    f"YouTube media URL rejected the probe with HTTP {status}"
+                )
+                # A rejected URL may be format-specific. Continue through all
+                # routes for this client before moving to the next client profile.
+                if status in _STREAM_PROBE_SWITCH_CLIENT:
+                    continue
+
+            if switch_client:
+                continue
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No playable YouTube media stream is available")
+
+    async def _async_probe_stream(self, info: StreamInfo) -> int:
+        """Probe one byte from a direct media URL without blocking HA startup."""
+        headers = {
+            key: value
+            for key, value in info.http_headers.items()
+            if key.casefold()
+            not in {
+                "authorization",
+                "proxy-authorization",
+                "host",
+                "content-length",
+                "connection",
+                "transfer-encoding",
+            }
+        }
+        headers["Range"] = "bytes=0-0"
+        client = async_get_clientsession(self.hass)
+        response = await client.get(
+            info.url,
+            headers=headers,
+            allow_redirects=True,
+            timeout=_STREAM_PROBE_TIMEOUT,
+            auto_decompress=False,
+        )
+        try:
+            return response.status
+        finally:
+            response.release()
+
     def get_stream_session(self, token: str) -> StreamSession | None:
         """Return a live relay session without doing network or filesystem I/O."""
         now = time.monotonic()
@@ -304,7 +384,7 @@ class PlaybackManager:
         token: str,
         *,
         advance_route: bool,
-        avoid_android_vr: bool | None = None,
+        player_clients: tuple[str, ...] | None = None,
     ) -> StreamSession | None:
         """Refresh an expired/rejected upstream URL, optionally changing route/client."""
         session = self.get_stream_session(token)
@@ -328,10 +408,10 @@ class PlaybackManager:
         info = await self.async_resolve_stream(
             session.source_url,
             indexes,
-            avoid_android_vr=(
-                session.info.avoid_android_vr
-                if avoid_android_vr is None
-                else avoid_android_vr
+            player_clients=(
+                session.info.player_clients
+                if player_clients is None
+                else player_clients
             ),
         )
         session.info = info
@@ -582,6 +662,11 @@ def _best_thumbnail(info: dict[str, Any]) -> str | None:
     return None
 
 
+def _no_player_clients_error(error: Exception) -> bool:
+    """Return whether yt-dlp ended up with an empty YouTube client set."""
+    return "no player clients have been requested" in str(error).casefold()
+
+
 def _stream_mime_type(ext: str, acodec: str, vcodec: str = "") -> str:
     """Return an accurate speaker-friendly MIME type for a selected format."""
     has_video = bool(vcodec and vcodec not in {"none", "null"})
@@ -590,14 +675,8 @@ def _stream_mime_type(ext: str, acodec: str, vcodec: str = "") -> str:
     if has_video and ext == "webm":
         return "video/webm"
     if ext in ("m4a", "mp4") or acodec.startswith("mp4a"):
-        if acodec.startswith("mp4a."):
-            return f'audio/mp4; codecs="{acodec}"'
         return "audio/mp4"
     if ext in ("webm", "weba"):
-        if "opus" in acodec:
-            return 'audio/webm; codecs="opus"'
-        if "vorbis" in acodec:
-            return 'audio/webm; codecs="vorbis"'
         return "audio/webm"
     if ext in ("ogg", "oga", "opus") or "opus" in acodec:
         return "audio/ogg"

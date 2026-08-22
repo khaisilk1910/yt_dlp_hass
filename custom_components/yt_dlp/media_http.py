@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 from pathlib import Path
 from typing import Final
@@ -15,7 +16,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .playback import STREAM_URL_PREFIX, _mime_from_suffix
 
-_UPSTREAM_RETRY_STATUSES: Final = frozenset({401, 403, 404, 410})
+_LOGGER = logging.getLogger(__name__)
+_UPSTREAM_RETRY_STATUSES: Final = frozenset({401, 403, 404, 410, 429})
 _RESPONSE_HEADERS: Final = (
     "Content-Type",
     "Content-Length",
@@ -140,24 +142,20 @@ class YoutubeDlpStreamView(HomeAssistantView):
         manager = get_playback_manager(hass)
         client = async_get_clientsession(hass)
 
-        # 1) current direct URL
-        # 2) freshly resolve the same format route
-        # 3) retry that route with android_vr excluded
-        # 4) try another format with yt-dlp's normal client selection
-        # 5) finally combine another format with the safe client selection
-        #
-        # The normal alternate route matters: a client-pinned extraction can have
-        # fewer formats than yt-dlp's defaults and must not be allowed to mask a
-        # usable stream with "Requested format is not available".
+        # The stream was already one-byte probed before play_media, so the first
+        # request should normally succeed. These bounded fallbacks are for an URL
+        # that expires later, a seek after expiry, or a YouTube client regression.
+        # Use positive client names only; never subtract a client from ``default``.
         attempts = (
             ("current", None, None),
-            ("refresh", False, None),
-            ("safe-client", False, True),
-            ("alternate-route", True, False),
-            ("safe-alternate-route", True, True),
+            ("refresh-current", False, None),
+            ("android-vr", False, ("android_vr",)),
+            ("web-embedded", False, ("web_embedded",)),
+            ("android-vr-alternate", True, ("android_vr",)),
+            ("web-embedded-alternate", True, ("web_embedded",)),
         )
         last_error: Exception | None = None
-        for label, advance_route, avoid_android_vr in attempts:
+        for label, advance_route, player_clients in attempts:
             if advance_route is None:
                 stream_session = manager.get_stream_session(token)
             else:
@@ -165,7 +163,7 @@ class YoutubeDlpStreamView(HomeAssistantView):
                     stream_session = await manager.async_refresh_stream(
                         token,
                         advance_route=advance_route,
-                        avoid_android_vr=avoid_android_vr,
+                        player_clients=player_clients,
                     )
                 except Exception as err:  # noqa: BLE001 - continue with safe fallback
                     last_error = err
@@ -202,6 +200,10 @@ class YoutubeDlpStreamView(HomeAssistantView):
             response.release()
 
         if last_error is not None:
+            _LOGGER.warning(
+                "YouTube-DLP stream relay failed after bounded fallbacks: %s",
+                last_error,
+            )
             raise web.HTTPBadGateway(
                 text="Unable to open a playable upstream media stream"
             ) from last_error

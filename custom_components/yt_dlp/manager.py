@@ -42,6 +42,12 @@ from .notifications import async_send_download_notifications
 _LOGGER = logging.getLogger(__name__)
 _JS_RUNTIME_UNSET = object()
 _FFMPEG_LOCATION_UNSET = object()
+_YOUTUBE_DOWNLOAD_CLIENT_PROFILES: tuple[tuple[str, ...] | None, ...] = (
+    None,
+    ("android_vr",),
+    ("web_embedded",),
+    ("web_safari",),
+)
 
 
 @dataclass(slots=True)
@@ -454,10 +460,9 @@ class YoutubeDlpManager:
                 {"status": data.get("status")},
             )
 
-        # Let the installed yt-dlp choose its current upstream YouTube clients.
-        # Do not pin player clients or PO-token providers here; those assumptions
-        # become stale quickly and yt-dlp 2026.08.19 already carries current
-        # YouTube client maintenance/fallbacks.
+        # Start with yt-dlp's current default YouTube clients. Positive client
+        # profiles below are bounded fallbacks only after extraction/download
+        # fails; no client is excluded from a moving ``default`` preset.
         os.makedirs(job_temp, exist_ok=True)
         self.hass.add_job(self._set_job_status, job.job_id, "extracting")
 
@@ -470,25 +475,27 @@ class YoutubeDlpManager:
         extracted: Any = None
         last_error: Exception | None = None
 
-        # First run is intentionally identical to the known-good 0.4.1 worker:
-        # let yt-dlp 2026.08.19 select its default YouTube clients. Only if the
-        # complete attempt set ends in an HTTP 403 do one clean retry explicitly
-        # excluding android_vr. This is a narrow fallback for stale/contaminated
-        # long-running interpreter state and for upstream client regressions; it
-        # never changes the successful path.
-        for client_fallback in (False, True):
+        # If YouTube rejects every selected source route, retry with positive
+        # client names that expose independent media paths. The final web_safari
+        # profile can also expose HLS. Never use a negative expression such as
+        # ``default,-android_vr`` because a moving default preset can become empty.
+        for profile_index, player_clients in enumerate(
+            _YOUTUBE_DOWNLOAD_CLIENT_PROFILES
+        ):
             last_error = None
+            profile_name = (
+                "default" if player_clients is None else ",".join(player_clients)
+            )
             for attempt, audio_selector in enumerate(audio_selectors, start=1):
                 if job.cancel_event.is_set():
                     raise DownloadCancelled(
                         "Download cancelled because the integration is unloading"
                     )
 
-                # Preserve the known-good worker's temp layout on the normal
-                # path. The extra directory name exists only for the 403 client
-                # fallback, so a successful first pass is behaviorally identical.
-                if client_fallback:
-                    attempt_temp = os.path.join(job_temp, f"safe-attempt-{attempt}")
+                if profile_index:
+                    attempt_temp = os.path.join(
+                        job_temp, f"client-{profile_index}-attempt-{attempt}"
+                    )
                 elif len(audio_selectors) > 1:
                     attempt_temp = os.path.join(job_temp, f"attempt-{attempt}")
                 else:
@@ -500,7 +507,7 @@ class YoutubeDlpManager:
                     progress_hook,
                     postprocessor_hook,
                     audio_source_selector=audio_selector,
-                    avoid_android_vr=client_fallback,
+                    player_clients=player_clients,
                 )
 
                 try:
@@ -512,16 +519,23 @@ class YoutubeDlpManager:
                     raise
                 except DownloadError as err:
                     last_error = err
+
+                    # Changing the format selector cannot repair an empty player
+                    # client set. Move directly to the next positive client.
+                    if self._is_no_player_clients(err):
+                        break
+
                     if self._should_retry_audio_download(
                         request, err, attempt, len(audio_selectors)
                     ):
                         next_selector = audio_selectors[attempt]
                         _LOGGER.warning(
-                            "Audio source attempt %s/%s failed for job %s (%s); "
-                            "retrying with fallback selector %s",
+                            "Audio source attempt %s/%s failed for job %s with "
+                            "YouTube client %s (%s); retrying selector %s",
                             attempt,
                             len(audio_selectors),
                             job.job_id,
+                            profile_name,
                             self._short_error(err),
                             next_selector,
                         )
@@ -535,15 +549,24 @@ class YoutubeDlpManager:
             if extracted is not None:
                 break
 
+            has_next_profile = profile_index + 1 < len(
+                _YOUTUBE_DOWNLOAD_CLIENT_PROFILES
+            )
             if (
-                not client_fallback
+                has_next_profile
                 and last_error is not None
-                and self._is_http_403(last_error)
+                and self._should_retry_client_profile(last_error)
             ):
+                next_clients = _YOUTUBE_DOWNLOAD_CLIENT_PROFILES[profile_index + 1]
+                next_name = (
+                    "default" if next_clients is None else ",".join(next_clients)
+                )
                 _LOGGER.warning(
-                    "YouTube returned HTTP 403 for job %s; retrying once with "
-                    "android_vr excluded while preserving the same requested format",
+                    "YouTube client %s failed for job %s (%s); retrying with %s",
+                    profile_name,
                     job.job_id,
+                    self._short_error(last_error),
+                    next_name,
                 )
                 shutil.rmtree(job_temp, ignore_errors=True)
                 os.makedirs(job_temp, exist_ok=True)
@@ -589,7 +612,7 @@ class YoutubeDlpManager:
         postprocessor_hook: Any,
         *,
         audio_source_selector: str | None = None,
-        avoid_android_vr: bool = False,
+        player_clients: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """Build controlled yt-dlp options from service fields."""
         opts: dict[str, Any] = {
@@ -626,13 +649,9 @@ class YoutubeDlpManager:
         if js_runtimes := self._js_runtime_options():
             opts["js_runtimes"] = js_runtimes
 
-        if avoid_android_vr:
-            # API equivalent of:
-            # --extractor-args "youtube:player_client=default,-android_vr"
-            # Keep this strictly as a retry path; yt-dlp's defaults remain the
-            # first choice and can evolve independently in future releases.
+        if player_clients:
             opts["extractor_args"] = {
-                "youtube": {"player_client": ["default", "-android_vr"]}
+                "youtube": {"player_client": list(player_clients)}
             }
 
         if request.media_type == MEDIA_TYPE_AUDIO:
@@ -695,6 +714,23 @@ class YoutubeDlpManager:
         """Return whether yt-dlp reported an upstream HTTP 403 rejection."""
         message = str(error).casefold()
         return "http error 403" in message or "403: forbidden" in message
+
+    @staticmethod
+    def _is_no_player_clients(error: Exception) -> bool:
+        """Return whether yt-dlp ended up with an empty YouTube client set."""
+        return "no player clients have been requested" in str(error).casefold()
+
+    @classmethod
+    def _should_retry_client_profile(cls, error: Exception) -> bool:
+        """Return whether a different positive YouTube client may recover."""
+        message = str(error).casefold()
+        return (
+            cls._is_http_403(error)
+            or cls._is_no_player_clients(error)
+            or "requested format is not available" in message
+            or "no video formats found" in message
+            or "only images are available" in message
+        )
 
     @staticmethod
     def _should_retry_audio_download(
