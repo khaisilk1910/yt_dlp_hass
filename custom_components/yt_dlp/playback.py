@@ -22,7 +22,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.importlib import async_import_module
 
-from .favorites import FavoritesStore
 from .helpers import (
     detect_javascript_runtime,
     normalize_download_directory,
@@ -118,7 +117,6 @@ class PlaybackManager:
         self._library_cache: list[dict[str, Any]] | None = None
         self._library_cache_at = 0.0
         self._stream_sessions: dict[str, StreamSession] = {}
-        self.favorites = FavoritesStore(hass)
         self._javascript_runtime: tuple[str, str] | None | object = _JS_RUNTIME_UNSET
         self._javascript_runtime_lock = threading.Lock()
 
@@ -353,19 +351,6 @@ class PlaybackManager:
         )
         for session in oldest[: len(self._stream_sessions) - MAX_STREAM_SESSIONS]:
             self._stream_sessions.pop(session.token, None)
-
-    async def async_list_favorites(self) -> list[dict[str, Any]]:
-        """Return persistent favorite YouTube metadata."""
-        return await self.favorites.async_list()
-
-    async def async_add_favorite(self, url: str) -> dict[str, Any]:
-        """Resolve metadata for one YouTube URL and persist it as a favorite."""
-        info = await self.async_resolve_stream(url)
-        return await self.favorites.async_add(info.as_dict())
-
-    async def async_remove_favorite(self, url: str) -> bool:
-        """Remove one persistent favorite by its canonical webpage URL."""
-        return await self.favorites.async_remove(url)
 
     async def async_scan_library(self, *, force: bool = False) -> list[dict[str, Any]]:
         """Return cached local audio list, refreshing in an executor when needed."""

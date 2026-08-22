@@ -197,22 +197,3 @@ scan_library:
       selector:
         boolean:
 
-
-list_favorites:
-  fields: {}
-
-add_favorite:
-  fields:
-    url:
-      required: true
-      selector:
-        text:
-          type: url
-
-remove_favorite:
-  fields:
-    url:
-      required: true
-      selector:
-        text:
-          type: url

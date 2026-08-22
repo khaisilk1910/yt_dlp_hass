@@ -52,15 +52,12 @@ from .const import (
     MEDIA_TYPE_VIDEO,
     MEDIA_TYPES,
     RESPONSE_METADATA_TIMEOUT,
-    SERVICE_ADD_FAVORITE,
     SERVICE_DOWNLOAD,
     SERVICE_DOWNLOAD_AUDIO,
     SERVICE_DOWNLOAD_VIDEO,
     SERVICE_GET_JOB,
-    SERVICE_LIST_FAVORITES,
     SERVICE_PLAY,
     SERVICE_PLAY_MULTI,
-    SERVICE_REMOVE_FAVORITE,
     SERVICE_SCAN_LIBRARY,
     SERVICE_SEARCH,
     STATE_DOWNLOADER,
@@ -181,6 +178,7 @@ PLAY_SCHEMA = vol.Schema(
     }
 )
 
+
 def _media_player_entities(value: object) -> list[str]:
     """Validate one or more unique media_player entity ids."""
     raw_items = [value] if isinstance(value, str) else value
@@ -212,8 +210,6 @@ SCAN_LIBRARY_SCHEMA = vol.Schema(
         vol.Optional(ATTR_FORCE, default=False): cv.boolean,
     }
 )
-
-FAVORITE_URL_SCHEMA = vol.Schema({vol.Required(ATTR_URL): _http_url})
 
 
 def _get_loaded_manager(hass: HomeAssistant) -> YoutubeDlpManager:
@@ -410,9 +406,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             if info.thumbnail:
                 metadata["images"] = [{"url": info.thumbnail}]
 
-            # Resolve YouTube once, then let Home Assistant target all selected
-            # players in one service call. The existing single-player service is
-            # intentionally left unchanged.
             await hass.services.async_call(
                 "media_player",
                 SERVICE_PLAY_MEDIA,
@@ -457,35 +450,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "count": len(items),
             "items": items,
         }
-
-    async def async_list_favorites(call: ServiceCall) -> ServiceResponse:
-        """Return persistent favorites for dashboard clients."""
-        playback = get_playback_manager(hass)
-        try:
-            items = await playback.async_list_favorites()
-        except Exception as err:
-            raise HomeAssistantError(str(err)) from err
-        return {"count": len(items), "items": items}
-
-    async def async_add_favorite(call: ServiceCall) -> ServiceResponse:
-        """Resolve metadata and persist one favorite URL."""
-        playback = get_playback_manager(hass)
-        try:
-            item = await playback.async_add_favorite(call.data[ATTR_URL])
-            items = await playback.async_list_favorites()
-        except Exception as err:
-            raise HomeAssistantError(str(err)) from err
-        return {"count": len(items), "item": item, "items": items}
-
-    async def async_remove_favorite(call: ServiceCall) -> ServiceResponse:
-        """Remove one persistent favorite URL."""
-        playback = get_playback_manager(hass)
-        try:
-            removed = await playback.async_remove_favorite(call.data[ATTR_URL])
-            items = await playback.async_list_favorites()
-        except Exception as err:
-            raise HomeAssistantError(str(err)) from err
-        return {"removed": removed, "count": len(items), "items": items}
 
     hass.services.async_register(
         DOMAIN,
@@ -541,26 +505,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_SCAN_LIBRARY,
         async_scan_library,
         schema=SCAN_LIBRARY_SCHEMA,
-        supports_response=SupportsResponse.ONLY,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_LIST_FAVORITES,
-        async_list_favorites,
-        supports_response=SupportsResponse.ONLY,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_ADD_FAVORITE,
-        async_add_favorite,
-        schema=FAVORITE_URL_SCHEMA,
-        supports_response=SupportsResponse.ONLY,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_REMOVE_FAVORITE,
-        async_remove_favorite,
-        schema=FAVORITE_URL_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     return True

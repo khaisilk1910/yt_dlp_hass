@@ -17,11 +17,6 @@ class YtDlpMediaCard extends HTMLElement {
     this._libraryLoading = false;
     this._query = "";
     this._libraryPage = 1;
-    this._favorites = [];
-    this._favoritesLoaded = false;
-    this._favoritesLoading = false;
-    this._favoritesAdding = false;
-    this._favoritePage = 1;
     this._pageSize = 10;
     this._nowPlaying = null;
     this._currentLibraryIndex = -1;
@@ -135,9 +130,6 @@ class YtDlpMediaCard extends HTMLElement {
     if (shouldRender) this._render();
     if (!previous && !this._libraryLoaded && !this._libraryLoading) {
       this._loadLibrary(false);
-    }
-    if (!previous && !this._favoritesLoaded && !this._favoritesLoading) {
-      this._loadFavorites();
     }
   }
 
@@ -279,11 +271,6 @@ class YtDlpMediaCard extends HTMLElement {
   _fileName(path) {
     const value = String(path || "");
     return value.split(/[\\/]/).filter(Boolean).pop() || value;
-  }
-
-  _formatDuration(seconds) {
-    const value = Number(seconds);
-    return Number.isFinite(value) && value > 0 ? this._formatTime(value) : "";
   }
 
   _pageData(items, requestedPage) {
@@ -479,8 +466,6 @@ class YtDlpMediaCard extends HTMLElement {
       : [];
     const libraryPageData = this._pageData(filteredLibrary, this._libraryPage);
     this._libraryPage = libraryPageData.page;
-    const favoritePageData = this._pageData(this._favorites, this._favoritePage);
-    this._favoritePage = favoritePageData.page;
 
     const playerView = this._view === "player" ? `
       <div class="speaker-row">
@@ -553,30 +538,6 @@ class YtDlpMediaCard extends HTMLElement {
           <input id="youtubeUrl" type="url" value="${this._escape(this._youtubeUrl)}" placeholder="Dán link YouTube để phát trực tiếp..." autocomplete="off">
           <button id="playUrl" class="accent-btn" ${!this._selectedPlayer || this._busy ? "disabled" : ""}>${this._icon("play")} Phát</button>
         </div>
-        <div class="favorite-toolbar">
-          <div><strong>Nhạc yêu thích</strong><span>${this._favorites.length} bài đã lưu</span></div>
-          <button id="addFavorite" class="favorite-add ${this._favoritesAdding ? "spinning" : ""}" ${!this._youtubeUrl.trim() || this._favoritesAdding ? "disabled" : ""}>
-            ${this._icon(this._favoritesAdding ? "loading" : "heart-plus-outline")} <span>${this._favoritesAdding ? "Đang thêm" : "Thêm link"}</span>
-          </button>
-        </div>
-        <div class="favorite-list scroll-five">
-          ${this._favoritesLoading && !this._favoritesLoaded ? `<div class="empty">${this._icon("loading")} Đang tải yêu thích...</div>` : ""}
-          ${!this._favoritesLoading && this._favoritesLoaded && !this._favorites.length ? `<div class="empty compact">${this._icon("heart-outline")} Chưa có bài yêu thích.</div>` : ""}
-          ${favoritePageData.items.map((item, localIndex) => {
-            const index = favoritePageData.start + localIndex;
-            return `
-              <div class="favorite-row">
-                <div class="favorite-thumb">${item.thumbnail ? `<img src="${this._escape(item.thumbnail)}" alt="" loading="lazy">` : this._icon("music-note")}</div>
-                <div class="favorite-text">
-                  <strong title="${this._escape(item.title || "YouTube audio")}">${this._escape(item.title || "YouTube audio")}</strong>
-                  <small>${this._escape(item.artist || "YouTube")}${this._formatDuration(item.duration) ? ` • ${this._formatDuration(item.duration)}` : ""}</small>
-                </div>
-                <button class="mini-action" data-favorite-play="${index}" title="Phát">${this._icon("play")}</button>
-                <button class="mini-action danger" data-favorite-remove="${index}" title="Xóa khỏi yêu thích">${this._icon("delete-outline")}</button>
-              </div>`;
-          }).join("")}
-        </div>
-        ${this._renderPagination("favorites", favoritePageData.page, favoritePageData.totalPages)}
       </section>
 
       <section class="panel ${this._tab === "library" ? "active" : ""}" id="libraryPanel">
@@ -677,11 +638,8 @@ class YtDlpMediaCard extends HTMLElement {
 
     $("youtubeUrl")?.addEventListener("input", (event) => {
       this._youtubeUrl = event.target.value;
-      const addButton = this.shadowRoot.getElementById("addFavorite");
-      if (addButton && !this._favoritesAdding) addButton.disabled = !this._youtubeUrl.trim();
     });
     $("playUrl")?.addEventListener("click", () => this._playUrl());
-    $("addFavorite")?.addEventListener("click", () => this._addFavorite());
     $("youtubeUrl")?.addEventListener("keydown", (event) => {
       if (event.key === "Enter") this._playUrl();
     });
@@ -707,16 +665,9 @@ class YtDlpMediaCard extends HTMLElement {
       button.addEventListener("click", () => this._playLibrary(Number(button.dataset.libraryIndex)));
     });
 
-    this.shadowRoot.querySelectorAll("[data-favorite-play]").forEach((button) => {
-      button.addEventListener("click", () => this._playFavorite(Number(button.dataset.favoritePlay)));
-    });
-    this.shadowRoot.querySelectorAll("[data-favorite-remove]").forEach((button) => {
-      button.addEventListener("click", () => this._removeFavorite(Number(button.dataset.favoriteRemove)));
-    });
     this.shadowRoot.querySelectorAll("[data-page-kind]").forEach((button) => {
       button.addEventListener("click", () => {
         const page = Number(button.dataset.page) || 1;
-        if (button.dataset.pageKind === "favorites") this._favoritePage = page;
         if (button.dataset.pageKind === "library") this._libraryPage = page;
         this._render();
       });
@@ -757,62 +708,6 @@ class YtDlpMediaCard extends HTMLElement {
     if (target) message.target = target;
     const result = await this._hass.callWS(message);
     return result?.response ?? result;
-  }
-
-  async _loadFavorites() {
-    if (!this._hass || this._favoritesLoading) return;
-    this._favoritesLoading = true;
-    if (this._view === "player" && this._tab === "youtube") this._render();
-    try {
-      const response = await this._callServiceResponse("yt_dlp", "list_favorites");
-      this._favorites = Array.isArray(response?.items) ? response.items : [];
-      this._favoritesLoaded = true;
-      this._favoritePage = Math.min(this._favoritePage, Math.max(1, Math.ceil(this._favorites.length / this._pageSize)));
-    } catch (error) {
-      this._notify(`Không thể tải danh sách yêu thích: ${error?.message || error}`);
-    } finally {
-      this._favoritesLoading = false;
-      if (this._view === "player" && this._tab === "youtube") this._render();
-    }
-  }
-
-  async _addFavorite() {
-    const url = this._youtubeUrl.trim();
-    if (!url || !this._hass || this._favoritesAdding) return;
-    this._favoritesAdding = true;
-    this._render();
-    try {
-      const response = await this._callServiceResponse("yt_dlp", "add_favorite", { url });
-      this._favorites = Array.isArray(response?.items) ? response.items : this._favorites;
-      this._favoritesLoaded = true;
-      this._favoritePage = 1;
-      this._notify(`Đã lưu: ${response?.item?.title || "bài yêu thích"}`);
-    } catch (error) {
-      this._notify(`Không thể thêm yêu thích: ${error?.message || error}`);
-    } finally {
-      this._favoritesAdding = false;
-      this._render();
-    }
-  }
-
-  async _removeFavorite(index) {
-    const item = this._favorites[index];
-    if (!item?.url || !this._hass) return;
-    try {
-      const response = await this._callServiceResponse("yt_dlp", "remove_favorite", { url: item.url });
-      this._favorites = Array.isArray(response?.items) ? response.items : this._favorites.filter((_, itemIndex) => itemIndex !== index);
-      this._favoritePage = Math.min(this._favoritePage, Math.max(1, Math.ceil(this._favorites.length / this._pageSize)));
-      this._render();
-    } catch (error) {
-      this._notify(`Không thể xóa yêu thích: ${error?.message || error}`);
-    }
-  }
-
-  async _playFavorite(index) {
-    const item = this._favorites[index];
-    if (!item?.url) return;
-    this._youtubeUrl = item.url;
-    await this._playUrl();
   }
 
   async _playUrl() {
@@ -912,7 +807,7 @@ class YtDlpMediaCard extends HTMLElement {
       if (["completed", "error", "cancelled"].includes(response.status)) {
         await this._finishDownload(response);
       } else {
-        this._updateDownloadJobOnly(response);
+        this._render();
       }
     } catch (error) {
       // A transient frontend/websocket error must not affect the downloader.
@@ -934,36 +829,6 @@ class YtDlpMediaCard extends HTMLElement {
     } finally {
       this._downloadPollInFlight = false;
     }
-  }
-
-  _updateDownloadJobOnly(job) {
-    if (!this.shadowRoot || this._view !== "download" || !job) return;
-    const percent = this._downloadPercent(job);
-    const downloaded = this._formatSize(job.downloaded_bytes) || "0 B";
-    const total = this._formatSize(job.total_bytes);
-    const speed = this._formatSize(job.speed);
-    const eta = Number(job.eta);
-    const resultFile = job.final_files?.length ? this._fileName(job.final_files[0]) : this._fileName(job.filename);
-    const title = this.shadowRoot.getElementById("downloadJobTitle");
-    const status = this.shadowRoot.getElementById("downloadJobStatus");
-    const percentEl = this.shadowRoot.getElementById("downloadJobPercent");
-    const progress = this.shadowRoot.getElementById("downloadProgressBar");
-    const bytes = this.shadowRoot.getElementById("downloadBytes")?.querySelector("span");
-    const speedWrap = this.shadowRoot.getElementById("downloadSpeed");
-    const speedText = speedWrap?.querySelector("span");
-    const etaWrap = this.shadowRoot.getElementById("downloadEta");
-    const etaText = etaWrap?.querySelector("span");
-
-    if (title) title.textContent = job.title || resultFile || "Đang chuẩn bị tải...";
-    if (status) status.textContent = this._downloadStatusLabel(job.status);
-    if (percentEl) percentEl.textContent = `${Math.round(percent)}%`;
-    if (progress) progress.style.width = `${percent}%`;
-    if (bytes) bytes.textContent = `${downloaded}${total ? ` / ${total}` : ""}`;
-    if (speedWrap) speedWrap.classList.toggle("metric-hidden", !job.speed);
-    if (speedText) speedText.textContent = job.speed ? `${speed}/s` : "";
-    const showEta = Number.isFinite(eta) && eta >= 0;
-    if (etaWrap) etaWrap.classList.toggle("metric-hidden", !showEta);
-    if (etaText) etaText.textContent = showEta ? this._formatTime(eta) : "";
   }
 
   async _finishDownload(job) {
@@ -1195,7 +1060,7 @@ class YtDlpMediaCard extends HTMLElement {
       .card{position:relative;overflow:hidden;border-radius:28px;color:var(--text);background:linear-gradient(145deg,var(--card-bg),color-mix(in srgb,var(--card-bg) 94%,var(--text) 6%));box-shadow:var(--ha-card-box-shadow,0 12px 34px rgba(0,0,0,.14));isolation:isolate}
       .ambient{position:absolute;inset:-40px;background-size:cover;background-position:center;filter:blur(48px) saturate(1.35);opacity:.07;transform:scale(1.12);transition:opacity .5s ease}.is-playing .ambient{opacity:.18;animation:floatbg 9s ease-in-out infinite alternate}
       .surface{position:relative;z-index:1;padding:22px;background:linear-gradient(180deg,color-mix(in srgb,var(--card-bg) 97%,var(--text) 3%),color-mix(in srgb,var(--card-bg) 99%,transparent));backdrop-filter:blur(18px)}
-      header,.brand,.speaker-row,.field,.now-playing,.controls,.volume-row,.primary-tabs,.tabs,.url-box,.library-tools,.search-box,.library-meta,.track-row,.download-hero,.job-top,.job-metrics,.result-file,.download-notice,.favorite-toolbar,.favorite-row,.pagination{display:flex;align-items:center}
+      header,.brand,.speaker-row,.field,.now-playing,.controls,.volume-row,.primary-tabs,.tabs,.url-box,.library-tools,.search-box,.library-meta,.track-row,.download-hero,.job-top,.job-metrics,.result-file,.download-notice,.pagination{display:flex;align-items:center}
       header{justify-content:space-between;gap:16px}.brand{gap:12px}.brand-icon{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 8px 24px color-mix(in srgb,var(--accent) 30%,transparent)}.brand-icon ha-icon{--mdc-icon-size:26px}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.19em;color:var(--muted)}.brand-title{font-size:18px;font-weight:800;letter-spacing:-.02em}.status{gap:7px;padding:8px 11px;border:1px solid var(--border-soft);border-radius:999px;background:var(--surface-soft);font-size:11px;color:var(--muted)}.status span{width:7px;height:7px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 4px color-mix(in srgb,var(--muted) 12%,transparent)}.is-playing .status span,.status.downloading span{background:#28b77c;box-shadow:0 0 0 4px rgba(40,183,124,.13),0 0 12px rgba(40,183,124,.52)}
       .download-notice{gap:11px;margin-top:16px;padding:12px 13px;border-radius:16px;border:1px solid var(--border);animation:noticeIn .25s ease}.download-notice.success{background:color-mix(in srgb,#28b77c 12%,var(--card-bg));border-color:color-mix(in srgb,#28b77c 34%,transparent)}.download-notice.error{background:color-mix(in srgb,#e84c5b 11%,var(--card-bg));border-color:color-mix(in srgb,#e84c5b 34%,transparent)}.notice-icon{width:36px;height:36px;flex:0 0 36px;border-radius:12px;display:grid;place-items:center;background:var(--surface)}.success .notice-icon{color:#159b63}.error .notice-icon{color:#d63e50}.notice-icon ha-icon{--mdc-icon-size:21px}.notice-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.notice-copy strong{font-size:12px}.notice-copy span{font-size:10px;color:var(--muted);line-height:1.35;overflow-wrap:anywhere}.notice-close{width:30px;height:30px;border:0;border-radius:9px;background:transparent;color:var(--muted);cursor:pointer;display:grid;place-items:center}.notice-close:hover{background:var(--surface);color:var(--text)}.notice-close ha-icon{--mdc-icon-size:17px}
       .primary-tabs{gap:8px;margin-top:18px;padding:6px;border-radius:18px;background:var(--surface-soft);border:1px solid var(--border-soft)}.primary-tabs button{position:relative;flex:1;height:48px;border:0;border-radius:13px;background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;font-size:12px;font-weight:850;letter-spacing:.01em;transition:background .18s ease,color .18s ease,transform .18s ease,box-shadow .18s ease}.primary-tabs button:hover{color:var(--text);background:var(--surface)}.primary-tabs button.active{color:#fff;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 68%,var(--accent)));box-shadow:0 8px 22px color-mix(in srgb,var(--accent) 18%,transparent)}.primary-tabs ha-icon{--mdc-icon-size:21px}.primary-tabs .tab-pulse{position:absolute;right:12px;top:10px}
@@ -1204,8 +1069,7 @@ class YtDlpMediaCard extends HTMLElement {
       .transport{padding:4px 2px 8px}.progress-head{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums;margin-bottom:5px}.range{appearance:none;width:100%;height:4px;border-radius:999px;outline:none;background:linear-gradient(90deg,var(--accent) 0 var(--value,0%),var(--surface-strong) var(--value,0%) 100%)}.range::-webkit-slider-thumb{appearance:none;width:14px;height:14px;border-radius:50%;background:var(--text);box-shadow:0 2px 8px rgba(0,0,0,.25);cursor:pointer}.range::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:var(--text);cursor:pointer}.progress{height:5px}.controls{justify-content:center;gap:13px;margin:18px 0 16px}.icon-btn,.play-btn,.soft-btn{border:0;cursor:pointer;display:grid;place-items:center;transition:transform .18s ease,background .18s ease,opacity .18s ease}.icon-btn{width:43px;height:43px;border-radius:50%;background:var(--surface)}.icon-btn:hover,.soft-btn:hover{background:var(--surface-strong);transform:translateY(-1px)}.play-btn{width:62px;height:62px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 10px 28px color-mix(in srgb,var(--accent) 34%,transparent)}.play-btn:hover{transform:scale(1.045)}.play-btn ha-icon{--mdc-icon-size:31px}.busy ha-icon,.spinning ha-icon{animation:spin 1s linear infinite}.volume-row{gap:10px;color:var(--muted)}.volume-row ha-icon{--mdc-icon-size:18px}.volume-row .range{flex:1}.volume-row span{width:36px;text-align:right;font-size:10px;font-variant-numeric:tabular-nums}
       .tabs{gap:7px;margin:16px 0 12px;padding:5px;border-radius:15px;background:var(--surface-soft);border:1px solid var(--border-soft)}.tabs button{position:relative;flex:1;height:38px;border:0;border-radius:11px;background:transparent;color:var(--muted);font-size:12px;font-weight:750;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;min-width:0}.tabs button.active{background:var(--surface-strong);color:var(--text);box-shadow:0 4px 12px rgba(0,0,0,.07)}.tabs ha-icon{--mdc-icon-size:18px}.tabs b{font-size:9px;padding:2px 6px;border-radius:9px;background:var(--surface-strong)}.tab-pulse{width:6px;height:6px;border-radius:50%;background:#34c88a;box-shadow:0 0 10px rgba(52,200,138,.65);animation:pulseDot 1.3s ease-in-out infinite}
       .panel{display:none}.panel.active{display:block}.url-box{gap:9px;padding:8px 8px 8px 13px;border-radius:16px;background:var(--surface-soft);border:1px solid var(--border)}.url-box>ha-icon,.search-box>ha-icon{color:var(--muted);--mdc-icon-size:20px}.url-box input,.search-box input{min-width:0;flex:1;border:0;outline:0;color:var(--text);background:transparent}.url-box input::placeholder,.search-box input::placeholder{color:color-mix(in srgb,var(--muted) 75%,transparent)}.accent-btn{height:38px;border:0;border-radius:11px;padding:0 14px;display:flex;align-items:center;gap:6px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 72%,var(--accent)));color:#fff;font-size:12px;font-weight:800;cursor:pointer}.accent-btn:disabled{opacity:.45;cursor:default}.accent-btn ha-icon{--mdc-icon-size:17px}
-      .favorite-toolbar{justify-content:space-between;gap:10px;margin:12px 2px 7px}.favorite-toolbar>div{min-width:0;display:flex;flex-direction:column;gap:2px}.favorite-toolbar strong{font-size:11px}.favorite-toolbar span{font-size:9px;color:var(--muted)}.favorite-add{height:34px;border:1px solid color-mix(in srgb,var(--accent) 30%,var(--border));border-radius:10px;padding:0 10px;background:color-mix(in srgb,var(--accent) 9%,var(--card-bg));color:color-mix(in srgb,var(--accent) 78%,var(--text));cursor:pointer;display:flex;align-items:center;gap:6px;font-size:10px;font-weight:800}.favorite-add:disabled{opacity:.45;cursor:default}.favorite-add ha-icon{--mdc-icon-size:16px}
-      .favorite-list,.library-list{overflow:auto;margin:0 -4px;padding:2px 4px 4px;scrollbar-width:thin}.favorite-list.scroll-five{max-height:290px}.library-list.scroll-five{max-height:260px}.favorite-row{min-height:58px;gap:9px;padding:7px 6px;border-radius:13px}.favorite-row:hover{background:var(--surface-soft)}.favorite-thumb{width:46px;height:46px;flex:0 0 46px;border-radius:10px;overflow:hidden;display:grid;place-items:center;background:var(--surface);color:var(--muted)}.favorite-thumb img{width:100%;height:100%;object-fit:cover}.favorite-thumb ha-icon{--mdc-icon-size:20px}.favorite-text{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}.favorite-text strong,.favorite-text small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorite-text strong{font-size:11px}.favorite-text small{font-size:9px;color:var(--muted)}.mini-action{width:32px;height:32px;flex:0 0 32px;border:0;border-radius:10px;background:var(--surface);color:var(--text);cursor:pointer;display:grid;place-items:center}.mini-action:hover{background:var(--surface-strong)}.mini-action.danger{color:#d63e50}.mini-action ha-icon{--mdc-icon-size:17px}
+      .library-list{overflow:auto;margin:0 -4px;padding:2px 4px 4px;scrollbar-width:thin}.library-list.scroll-five{max-height:260px}
       .library-tools{gap:8px}.search-box{flex:1;height:42px;gap:8px;padding:0 12px;border-radius:13px;background:var(--surface-soft);border:1px solid var(--border)}.soft-btn{width:42px;height:42px;border-radius:13px;background:var(--surface)}.library-meta{justify-content:space-between;gap:8px;padding:9px 2px 7px;color:var(--muted);font-size:9px}.library-meta span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.track-row{width:100%;min-height:52px;gap:10px;text-align:left;border:0;border-radius:13px;padding:9px 10px;background:transparent;cursor:pointer}.track-row:hover,.track-row.selected{background:var(--surface)}.track-icon{width:34px;height:34px;flex:0 0 34px;border-radius:10px;display:grid;place-items:center;background:var(--surface);color:var(--muted)}.track-row.selected .track-icon{background:color-mix(in srgb,var(--accent) 18%,var(--card-bg));color:color-mix(in srgb,var(--accent) 80%,var(--text))}.track-icon ha-icon{--mdc-icon-size:18px}.track-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}.track-text strong,.track-text small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.track-text strong{font-size:12px;font-weight:750}.track-text small{font-size:9px;color:var(--muted)}.track-size{font-size:9px;color:var(--muted);white-space:nowrap}.row-play{opacity:.65;color:var(--text);transition:opacity .15s}.track-row:hover .row-play,.track-row.selected .row-play{opacity:1}.row-play ha-icon{--mdc-icon-size:18px}.empty{height:120px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--muted);font-size:12px}.empty.compact{height:86px}.empty ha-icon{--mdc-icon-size:20px}
       .pagination{justify-content:center;gap:5px;margin-top:8px;min-height:30px}.pagination button{min-width:29px;height:29px;padding:0 8px;border:1px solid var(--border-soft);border-radius:9px;background:var(--surface-soft);color:var(--muted);cursor:pointer;font-size:10px;font-weight:750}.pagination button:hover{color:var(--text);background:var(--surface)}.pagination button.active{border-color:color-mix(in srgb,var(--accent) 42%,transparent);background:color-mix(in srgb,var(--accent) 14%,var(--card-bg));color:color-mix(in srgb,var(--accent) 76%,var(--text))}.page-gap{color:var(--muted);font-size:10px}
       .download-hero{gap:11px;margin-bottom:12px;padding:12px 13px;border-radius:16px;background:color-mix(in srgb,var(--accent) 8%,var(--card-bg));border:1px solid color-mix(in srgb,var(--accent) 18%,var(--border))}.download-hero-icon{width:39px;height:39px;display:grid;place-items:center;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}.download-hero-icon ha-icon{--mdc-icon-size:22px}.download-hero>div:last-child{display:flex;flex-direction:column;gap:3px}.download-hero strong{font-size:13px}.download-hero span{font-size:9px;color:var(--muted)}
@@ -1214,7 +1078,7 @@ class YtDlpMediaCard extends HTMLElement {
       .job-card{margin-top:10px;padding:13px;border-radius:16px;background:var(--surface-soft);border:1px solid var(--border)}.job-card.done{border-color:rgba(40,183,124,.30);background:color-mix(in srgb,#28b77c 8%,var(--card-bg))}.job-card.failed{border-color:rgba(214,62,80,.30);background:color-mix(in srgb,#d63e50 8%,var(--card-bg))}.job-top{gap:10px}.job-status-icon{width:34px;height:34px;flex:0 0 34px;border-radius:11px;display:grid;place-items:center;background:var(--surface);color:var(--muted)}.job-status-icon.working{color:#159b63;background:color-mix(in srgb,#28b77c 10%,var(--card-bg))}.job-status-icon.working ha-icon{animation:downloadFloat 1.25s ease-in-out infinite}.job-title{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.job-title strong{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.job-title span{font-size:9px;color:var(--muted)}.job-top>b{font-size:11px;font-variant-numeric:tabular-nums}.download-progress{height:6px;margin-top:11px;overflow:hidden;border-radius:999px;background:var(--surface-strong)}.download-progress i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent2));box-shadow:0 0 14px color-mix(in srgb,var(--accent2) 35%,transparent);transition:width .3s ease}.job-metrics{gap:12px;flex-wrap:wrap;margin-top:9px;color:var(--muted);font-size:8px}.job-metrics>span{display:flex;align-items:center;gap:4px}.job-metrics ha-icon{--mdc-icon-size:13px}.job-metrics .metric-hidden{display:none}.result-file{gap:6px;margin-top:9px;padding-top:9px;border-top:1px solid var(--border-soft);font-size:9px;color:var(--muted);min-width:0}.result-file ha-icon{--mdc-icon-size:15px;color:#159b63}.result-file span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.job-error{display:flex;align-items:flex-start;gap:6px;margin-top:9px;padding:8px;border-radius:10px;background:color-mix(in srgb,#d63e50 9%,var(--card-bg));color:#d63e50;font-size:9px;line-height:1.35}.job-error ha-icon{--mdc-icon-size:15px;flex:0 0 auto}
       .download-btn{width:100%;height:45px;margin-top:11px;border:0;border-radius:14px;display:flex;align-items:center;justify-content:center;gap:8px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 72%,var(--accent)));color:#fff;font-size:12px;font-weight:850;cursor:pointer;box-shadow:0 9px 24px color-mix(in srgb,var(--accent) 22%,transparent);transition:transform .18s ease,opacity .18s ease}.download-btn:hover:not(:disabled){transform:translateY(-1px)}.download-btn:disabled{opacity:.45;cursor:default;box-shadow:none}.download-btn ha-icon{--mdc-icon-size:19px}
       @keyframes spin{to{transform:rotate(360deg)}}@keyframes ring{0%{opacity:.7;transform:scale(.97)}100%{opacity:0;transform:scale(1.1)}}@keyframes floatbg{from{transform:scale(1.1) translate3d(-1%,0,0)}to{transform:scale(1.18) translate3d(1%,1%,0)}}@keyframes noticeIn{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}@keyframes pulseDot{50%{opacity:.35;transform:scale(.75)}}@keyframes downloadFloat{50%{transform:translateY(2px)}}
-      @media(max-width:520px){.surface{padding:18px}.status{display:none}.primary-tabs button{height:45px;font-size:11px;gap:7px}.primary-tabs ha-icon{--mdc-icon-size:20px}.now-playing{gap:16px}.art-wrap{width:94px;height:94px;flex-basis:94px;border-radius:23px}.art{border-radius:19px}.track-title{font-size:20px}.controls{gap:9px}.icon-btn{width:40px;height:40px}.play-btn{width:58px;height:58px}.favorite-list.scroll-five{max-height:270px}.library-list.scroll-five{max-height:250px}.track-size{display:none}.tabs button{font-size:11px;gap:5px}.tabs button span{max-width:62px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.option-grid{grid-template-columns:1fr}.download-hero span{display:none}.favorite-add span{display:none}.favorite-add{width:34px;padding:0;justify-content:center}.favorite-thumb{width:42px;height:42px;flex-basis:42px}.mini-action{width:30px;height:30px;flex-basis:30px}}
+      @media(max-width:520px){.surface{padding:18px}.status{display:none}.primary-tabs button{height:45px;font-size:11px;gap:7px}.primary-tabs ha-icon{--mdc-icon-size:20px}.now-playing{gap:16px}.art-wrap{width:94px;height:94px;flex-basis:94px;border-radius:23px}.art{border-radius:19px}.track-title{font-size:20px}.controls{gap:9px}.icon-btn{width:40px;height:40px}.play-btn{width:58px;height:58px}.library-list.scroll-five{max-height:250px}.track-size{display:none}.tabs button{font-size:11px;gap:5px}.tabs button span{max-width:62px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.option-grid{grid-template-columns:1fr}.download-hero span{display:none}}
       @media(max-width:380px){.primary-tabs button span{font-size:10px}.primary-tabs{padding:5px;gap:6px}.tabs b{display:none}.tabs button span{display:none}.tabs button{height:40px}.tabs ha-icon{--mdc-icon-size:20px}}
       @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
     `;

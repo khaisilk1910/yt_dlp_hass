@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
-VERSION = "0.5.4"
+VERSION = "0.4.5"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 
@@ -15,9 +15,6 @@ SERVICE_SEARCH = "search"
 SERVICE_PLAY = "play"
 SERVICE_PLAY_MULTI = "play_multi"
 SERVICE_SCAN_LIBRARY = "scan_library"
-SERVICE_LIST_FAVORITES = "list_favorites"
-SERVICE_ADD_FAVORITE = "add_favorite"
-SERVICE_REMOVE_FAVORITE = "remove_favorite"
 
 ATTR_URL = "url"
 ATTR_MEDIA_TYPE = "media_type"
