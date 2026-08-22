@@ -45,12 +45,19 @@ _FFMPEG_LOCATION_UNSET = object()
 _MAX_AUDIO_SOURCE_ROUTES = 32
 _MAX_MUXED_SOURCE_ROUTES = 16
 _MAX_VIDEO_SOURCE_ROUTES = 12
-_YOUTUBE_DOWNLOAD_CLIENT_PROFILES: tuple[tuple[str, ...] | None, ...] = (
-    None,
+_MAX_PLAYER_RELOAD_RETRIES = 3
+_PLAYER_RELOAD_RETRY_DELAY_SECONDS = 0.6
+
+# Prefer the currently documented resilient combination first.  If YouTube's
+# player response is intermittently UNPLAYABLE/reload-required, the worker also
+# retries the same profile with a fresh YoutubeDL session before moving through
+# independent client paths.  Avoid logged-out tv here because its formats may be
+# DRM-only under current YouTube behaviour.
+_YOUTUBE_DOWNLOAD_CLIENT_PROFILES: tuple[tuple[str, ...], ...] = (
+    ("default", "web_embedded"),
     ("android_vr",),
     ("web_embedded",),
     ("web_safari",),
-    ("tv",),
 )
 
 
@@ -487,10 +494,9 @@ class YoutubeDlpManager:
             _YOUTUBE_DOWNLOAD_CLIENT_PROFILES
         ):
             last_error = None
-            profile_name = (
-                "default" if player_clients is None else ",".join(player_clients)
-            )
+            profile_name = ",".join(player_clients)
             attempt_index = 0
+            reload_retries = 0
             while attempt_index < len(source_selectors):
                 attempt = attempt_index + 1
                 source_selector = source_selectors[attempt_index]
@@ -527,6 +533,32 @@ class YoutubeDlpManager:
                 except DownloadError as err:
                     last_error = err
 
+                    # "The page needs to be reloaded" happens before yt-dlp has
+                    # selected any format, so changing ba/b quality cannot help.
+                    # It is also intermittent in current YouTube rollouts: retry
+                    # the same client with a fresh YoutubeDL session a few times,
+                    # then move to the next independent player client.
+                    if self._is_page_reload_error(err):
+                        if reload_retries < _MAX_PLAYER_RELOAD_RETRIES - 1:
+                            reload_retries += 1
+                            _LOGGER.warning(
+                                "YouTube player requested a page reload for job %s "
+                                "with client %s (retry %s/%s); retrying fresh session",
+                                job.job_id,
+                                profile_name,
+                                reload_retries + 1,
+                                _MAX_PLAYER_RELOAD_RETRIES,
+                            )
+                            shutil.rmtree(attempt_temp, ignore_errors=True)
+                            self.hass.add_job(
+                                self._reset_job_progress_for_retry, job.job_id
+                            )
+                            time.sleep(
+                                _PLAYER_RELOAD_RETRY_DELAY_SECONDS * reload_retries
+                            )
+                            continue
+                        break
+
                     # Changing the format selector cannot repair an empty player
                     # client set. Move directly to the next positive client.
                     if self._is_no_player_clients(err):
@@ -555,6 +587,7 @@ class YoutubeDlpManager:
                             self._reset_job_progress_for_retry, job.job_id
                         )
                         attempt_index = next_attempt_index
+                        reload_retries = 0
                         continue
                     break
 
@@ -570,9 +603,7 @@ class YoutubeDlpManager:
                 and self._should_retry_client_profile(last_error)
             ):
                 next_clients = _YOUTUBE_DOWNLOAD_CLIENT_PROFILES[profile_index + 1]
-                next_name = (
-                    "default" if next_clients is None else ",".join(next_clients)
-                )
+                next_name = ",".join(next_clients)
                 _LOGGER.warning(
                     "YouTube client %s failed for job %s (%s); retrying with %s",
                     profile_name,
@@ -759,6 +790,11 @@ class YoutubeDlpManager:
         return "http error 403" in message or "403: forbidden" in message
 
     @staticmethod
+    def _is_page_reload_error(error: Exception) -> bool:
+        """Return whether YouTube rejected the player response as transient reload."""
+        return "the page needs to be reloaded" in str(error).casefold()
+
+    @staticmethod
     def _is_no_player_clients(error: Exception) -> bool:
         """Return whether yt-dlp ended up with an empty YouTube client set."""
         return "no player clients have been requested" in str(error).casefold()
@@ -779,6 +815,7 @@ class YoutubeDlpManager:
         message = str(error).casefold()
         return (
             cls._is_http_403(error)
+            or cls._is_page_reload_error(error)
             or cls._is_no_player_clients(error)
             or cls._is_requested_format_unavailable(error)
             or "http error 401" in message

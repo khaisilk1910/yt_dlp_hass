@@ -156,8 +156,6 @@ class YoutubeDlpStreamView(HomeAssistantView):
             ("web-embedded-alternate", True, ("web_embedded",)),
             ("web-safari", False, ("web_safari",)),
             ("web-safari-alternate", True, ("web_safari",)),
-            ("tv", False, ("tv",)),
-            ("tv-alternate", True, ("tv",)),
         )
         last_error: Exception | None = None
         for label, advance_route, player_clients in attempts:

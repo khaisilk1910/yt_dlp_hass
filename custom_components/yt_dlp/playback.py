@@ -63,12 +63,19 @@ _STREAM_PROBE_OK = frozenset({200, 206})
 _STREAM_PROBE_SWITCH_CLIENT = frozenset({401, 429})
 _MAX_AUDIO_QUALITY_ROUTES = 32
 _MAX_MUXED_QUALITY_ROUTES = 16
-YOUTUBE_CLIENT_FALLBACKS: tuple[tuple[str, ...] | None, ...] = (
-    None,
+_MAX_PLAYER_RELOAD_RETRIES = 3
+_PLAYER_RELOAD_RETRY_DELAY_SECONDS = 0.6
+
+# YouTube currently has an intermittent player-response failure that surfaces as
+# "The page needs to be reloaded" before format selection even starts.  Start
+# with yt-dlp's documented default + web_embedded combination, then retry via
+# independent no/low-PO-token client paths.  Do not use the logged-out tv client
+# as a fallback: current yt-dlp guidance notes that its formats may be DRM-only.
+YOUTUBE_CLIENT_FALLBACKS: tuple[tuple[str, ...], ...] = (
+    ("default", "web_embedded"),
     ("android_vr",),
     ("web_embedded",),
     ("web_safari",),
-    ("tv",),
 )
 
 # Keep every quality step as a separate route. A slash-separated yt-dlp format
@@ -173,13 +180,35 @@ class PlaybackManager:
         async with self._stream_lock:
             yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
             youtube_dl_cls = youtube_dl_class(yt_dlp_module)
-            return await self.hass.async_add_executor_job(
-                self._resolve_stream_sync,
-                url,
-                youtube_dl_cls,
-                indexes,
-                player_clients,
-            )
+            reload_attempt = 0
+            while True:
+                try:
+                    return await self.hass.async_add_executor_job(
+                        self._resolve_stream_sync,
+                        url,
+                        youtube_dl_cls,
+                        indexes,
+                        player_clients,
+                    )
+                except Exception as err:  # noqa: BLE001 - yt-dlp public errors vary
+                    if (
+                        _page_reload_error(err)
+                        and reload_attempt < _MAX_PLAYER_RELOAD_RETRIES - 1
+                    ):
+                        reload_attempt += 1
+                        _LOGGER.warning(
+                            "YouTube player requested a page reload during stream "
+                            "extraction (client=%s, retry %s/%s); retrying with a "
+                            "fresh yt-dlp session",
+                            ",".join(player_clients or ("default",)),
+                            reload_attempt + 1,
+                            _MAX_PLAYER_RELOAD_RETRIES,
+                        )
+                        await asyncio.sleep(
+                            _PLAYER_RELOAD_RETRY_DELAY_SECONDS * reload_attempt
+                        )
+                        continue
+                    raise
 
     def _resolve_stream_sync(
         self,
@@ -720,6 +749,11 @@ def _best_thumbnail(info: dict[str, Any]) -> str | None:
             if isinstance(item, dict) and isinstance(item.get("url"), str):
                 return item["url"]
     return None
+
+
+def _page_reload_error(error: Exception) -> bool:
+    """Return whether YouTube rejected the player response as transient reload."""
+    return "the page needs to be reloaded" in str(error).casefold()
 
 
 def _no_player_clients_error(error: Exception) -> bool:
