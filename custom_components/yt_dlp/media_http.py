@@ -130,15 +130,19 @@ class YoutubeDlpStreamView(HomeAssistantView):
         manager = get_playback_manager(hass)
         client = async_get_clientsession(hass)
 
-        # 1) current direct URL
-        # 2) freshly resolve the same format route
-        # 3) on a persistent rejection, explicitly exclude android_vr
-        # 4) finally try another independent audio route with that safe client set
+        # Prefer the normal yt-dlp client selection first. Current YouTube
+        # rollouts can reject adaptive ANDROID_VR audio while the progressive MP4
+        # route (commonly format 18) still works. Therefore advance through the
+        # independent format routes before forcing a different player client.
+        # Safe-client extraction is last and each client is tried independently
+        # by PlaybackManager to avoid mixed-client URL regressions.
         attempts = (
             ("current", None, None),
             ("refresh", False, None),
+            ("alternate-route-1", True, None),
+            ("alternate-route-2", True, None),
             ("safe-client", False, True),
-            ("alternate-route", True, True),
+            ("safe-alternate-route", True, True),
         )
         last_error: Exception | None = None
         for label, advance_route, avoid_android_vr in attempts:
