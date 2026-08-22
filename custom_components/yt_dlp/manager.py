@@ -50,6 +50,7 @@ _YOUTUBE_DOWNLOAD_CLIENT_PROFILES: tuple[tuple[str, ...] | None, ...] = (
     ("android_vr",),
     ("web_embedded",),
     ("web_safari",),
+    ("tv",),
 )
 
 
@@ -644,6 +645,11 @@ class YoutubeDlpManager:
             "file_access_retries": 3,
             "socket_timeout": 30,
             "concurrent_fragment_downloads": 4,
+            # Do not trust a format merely because it appears in metadata.
+            # YouTube can expose URLs that immediately return 403/404. Let
+            # yt-dlp test the selected candidates and choose the best one that
+            # is actually downloadable before the real transfer starts.
+            "check_formats": "selected",
             "progress_delta": 1.0,
             "progress_hooks": [progress_hook],
             "postprocessor_hooks": [postprocessor_hook],
@@ -689,24 +695,34 @@ class YoutubeDlpManager:
 
     @staticmethod
     def _video_source_selectors(request: DownloadRequest) -> tuple[str, ...]:
-        """Return best-to-lower video routes while honoring the quality ceiling."""
+        """Return native-container first, then codec-agnostic video fallback."""
         height_filter = (
             ""
             if request.video_quality == "best"
             else f"[height<=?{request.video_quality}]"
         )
 
-        # Try the best separate video stream first and progressively step down.
-        # Keep best audio paired with each video tier; if a client exposes no
-        # separate tracks, the corresponding progressive ``b.N`` route remains
-        # available at each tier.
-        routes: list[str] = []
-        for index in range(1, _MAX_VIDEO_SOURCE_ROUTES + 1):
-            suffix = "" if index == 1 else f".{index}"
-            video = f"bv{suffix}{height_filter}"
-            muxed = f"b{suffix}{height_filter}"
-            routes.append(f"{video}+ba/{muxed}")
-        return tuple(routes)
+        # `check_formats=selected` already walks downward inside each selector
+        # until it finds a URL that is really downloadable. Keep the first route
+        # native to the requested container so the best case remains lossless.
+        # If YouTube exposes no usable native route, the generic route accepts
+        # any codecs/container and `_video_options` converts it only as a final
+        # fallback. This avoids both "Requested format is not available" and
+        # invalid WebM/MP4 stream-copy merges.
+        generic = f"bv{height_filter}+ba/b{height_filter}"
+        if request.video_format == "mp4":
+            native = (
+                f"bv[ext=mp4]{height_filter}+ba[ext=m4a]/"
+                f"b[ext=mp4]{height_filter}"
+            )
+            return (native, generic)
+        if request.video_format == "webm":
+            native = (
+                f"bv[ext=webm]{height_filter}+ba[ext=webm]/"
+                f"b[ext=webm]{height_filter}"
+            )
+            return (native, generic)
+        return (generic,)
 
     @staticmethod
     def _audio_options(
@@ -795,9 +811,11 @@ class YoutubeDlpManager:
 
         if cls._is_requested_format_unavailable(error):
             if request.media_type != MEDIA_TYPE_AUDIO:
-                # The current video selector already contains a muxed fallback.
-                # If it is unavailable, lower nth selectors cannot exist either.
-                return None
+                # Video has two deliberate phases: native requested container,
+                # then a codec/container-agnostic source that FFmpeg can convert.
+                # If the native route does not exist, move to the generic route
+                # instead of abandoning this YouTube client immediately.
+                return next_index
 
             current_selector = source_selectors[attempt_index]
             if isinstance(current_selector, str) and current_selector.startswith("ba"):
@@ -891,16 +909,36 @@ class YoutubeDlpManager:
             # Matroska accepts the widest range of YouTube codecs.
             selector = f"bv{height_filter}+ba/b{height_filter}"
 
+        selected_source = source_selector or selector
+        generic_fallback = (
+            source_selector is not None
+            and request.video_format in {"mp4", "webm"}
+            and "[ext=" not in source_selector
+        )
+
+        if generic_fallback:
+            # Generic YouTube fallback may be VP9/Opus, AV1/Opus, etc. Those
+            # codecs cannot always be stream-copied into MP4/WebM. Merge into
+            # Matroska first (widest codec support), then let FFmpeg convert to
+            # the format explicitly requested by the user. This path is used
+            # only after the native-container source has failed.
+            merge_format = "mkv"
+            postprocessor = {
+                "key": "FFmpegVideoConvertor",
+                "preferedformat": request.video_format,
+            }
+        else:
+            merge_format = request.video_format
+            postprocessor = {
+                "key": "FFmpegVideoRemuxer",
+                "preferedformat": request.video_format,
+            }
+
         return {
-            "format": source_selector or selector,
-            "merge_output_format": request.video_format,
+            "format": selected_source,
+            "merge_output_format": merge_format,
             "final_ext": request.video_format,
-            "postprocessors": [
-                {
-                    "key": "FFmpegVideoRemuxer",
-                    "preferedformat": request.video_format,
-                }
-            ],
+            "postprocessors": [postprocessor],
         }
 
     async def async_search(self, query: str, limit: int) -> list[dict[str, Any]]:

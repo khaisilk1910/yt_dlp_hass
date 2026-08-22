@@ -68,6 +68,7 @@ YOUTUBE_CLIENT_FALLBACKS: tuple[tuple[str, ...] | None, ...] = (
     ("android_vr",),
     ("web_embedded",),
     ("web_safari",),
+    ("tv",),
 )
 
 # Keep every quality step as a separate route. A slash-separated yt-dlp format
@@ -191,9 +192,14 @@ class PlaybackManager:
         from yt_dlp.utils import DownloadError
 
         last_error: Exception | None = None
-        for route_index in route_indexes:
-            if route_index < 0 or route_index >= len(STREAM_FORMAT_SELECTORS):
-                continue
+        indexes = tuple(
+            index
+            for index in route_indexes
+            if 0 <= index < len(STREAM_FORMAT_SELECTORS)
+        )
+        position = 0
+        while position < len(indexes):
+            route_index = indexes[position]
 
             opts: dict[str, Any] = {
                 "quiet": True,
@@ -201,6 +207,10 @@ class PlaybackManager:
                 "skip_download": True,
                 "noplaylist": True,
                 "format": STREAM_FORMAT_SELECTORS[route_index],
+                # Ask yt-dlp to reject selected URLs that cannot actually be
+                # opened. This makes `ba`/`b` automatically fall through to a
+                # lower downloadable format before the URL is handed to Cast.
+                "check_formats": "selected",
                 "socket_timeout": 20,
                 "retries": 3,
                 "extractor_retries": 2,
@@ -279,6 +289,26 @@ class PlaybackManager:
                     )
             except DownloadError as err:
                 last_error = err
+                if _requested_format_unavailable(err):
+                    # If one ba.N tier is absent, every later ba tier is absent
+                    # too. Relay refreshes may pass a long route list, so jump
+                    # straight to the first muxed/progressive route instead of
+                    # performing dozens of doomed YouTube extractions.
+                    if route_index < _FIRST_MUXED_ROUTE_INDEX:
+                        muxed_position = next(
+                            (
+                                candidate_position
+                                for candidate_position in range(position + 1, len(indexes))
+                                if indexes[candidate_position] >= _FIRST_MUXED_ROUTE_INDEX
+                            ),
+                            None,
+                        )
+                        if muxed_position is not None:
+                            position = muxed_position
+                            continue
+                    else:
+                        break
+                position += 1
 
         if last_error is not None:
             raise last_error
