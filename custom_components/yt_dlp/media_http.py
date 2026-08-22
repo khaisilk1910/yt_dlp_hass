@@ -17,7 +17,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .playback import STREAM_URL_PREFIX, _mime_from_suffix
 
 _LOGGER = logging.getLogger(__name__)
-_UPSTREAM_RETRY_STATUSES: Final = frozenset({401, 403, 404, 410, 429})
+_UPSTREAM_RETRY_STATUSES: Final = frozenset({401, 403, 404, 410, 416, 429})
 _RESPONSE_HEADERS: Final = (
     "Content-Type",
     "Content-Length",
@@ -149,10 +149,13 @@ class YoutubeDlpStreamView(HomeAssistantView):
         attempts = (
             ("current", None, None),
             ("refresh-current", False, None),
+            ("refresh-alternate", True, None),
             ("android-vr", False, ("android_vr",)),
-            ("web-embedded", False, ("web_embedded",)),
             ("android-vr-alternate", True, ("android_vr",)),
+            ("web-embedded", False, ("web_embedded",)),
             ("web-embedded-alternate", True, ("web_embedded",)),
+            ("web-safari", False, ("web_safari",)),
+            ("web-safari-alternate", True, ("web_safari",)),
         )
         last_error: Exception | None = None
         for label, advance_route, player_clients in attempts:

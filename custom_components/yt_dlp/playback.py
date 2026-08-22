@@ -60,20 +60,30 @@ _STREAM_PROBE_TIMEOUT = ClientTimeout(
     total=20, connect=10, sock_connect=10, sock_read=10
 )
 _STREAM_PROBE_OK = frozenset({200, 206})
-_STREAM_PROBE_SWITCH_CLIENT = frozenset({401, 403, 404, 410})
+_STREAM_PROBE_SWITCH_CLIENT = frozenset({401, 429})
+_MAX_AUDIO_QUALITY_ROUTES = 32
+_MAX_MUXED_QUALITY_ROUTES = 16
 YOUTUBE_CLIENT_FALLBACKS: tuple[tuple[str, ...] | None, ...] = (
     None,
     ("android_vr",),
     ("web_embedded",),
+    ("web_safari",),
 )
 
-# Keep separate routes. A slash selector only falls back when a format is absent;
-# it does not switch routes when a selected YouTube media URL later returns 403.
-STREAM_FORMAT_SELECTORS = (
-    "ba[ext=m4a]/ba[acodec^=mp4a]",
-    "ba[ext=webm]/ba[acodec^=opus]",
-    "b[ext=mp4]/b",
+# Keep every quality step as a separate route. A slash-separated yt-dlp format
+# expression only falls back when a format is absent; it does not move to the
+# next-lower format when the selected GoogleVideo URL itself later returns 403.
+# Separate ``ba.N`` routes let both the initial probe and the relay refresh walk
+# from the best audio stream down through lower qualities. Progressive/muxed
+# ``b.N`` routes are the final fallback for sparse client profiles (for example
+# profiles that expose only format 18).
+STREAM_FORMAT_SELECTORS = tuple(
+    ["ba"]
+    + [f"ba.{index}" for index in range(2, _MAX_AUDIO_QUALITY_ROUTES + 1)]
+    + ["b"]
+    + [f"b.{index}" for index in range(2, _MAX_MUXED_QUALITY_ROUTES + 1)]
 )
+_FIRST_MUXED_ROUTE_INDEX = _MAX_AUDIO_QUALITY_ROUTES
 
 
 @dataclass(slots=True, frozen=True)
@@ -303,7 +313,8 @@ class PlaybackManager:
 
         for player_clients in YOUTUBE_CLIENT_FALLBACKS:
             switch_client = False
-            for route_index in range(len(STREAM_FORMAT_SELECTORS)):
+            route_index = 0
+            while route_index < len(STREAM_FORMAT_SELECTORS):
                 try:
                     info = await self.async_resolve_stream(
                         url,
@@ -315,12 +326,26 @@ class PlaybackManager:
                     if _no_player_clients_error(err):
                         switch_client = True
                         break
-                    continue
+                    if _requested_format_unavailable(err):
+                        # If the n'th audio-only format does not exist, no later
+                        # ba.N route can exist either. Jump straight to the best
+                        # progressive/muxed fallback. Likewise, once b.N is
+                        # absent there is nothing lower left on this client.
+                        if route_index < _FIRST_MUXED_ROUTE_INDEX:
+                            route_index = _FIRST_MUXED_ROUTE_INDEX
+                            continue
+                        break
+                    if _retry_lower_stream_route(err):
+                        route_index += 1
+                        continue
+                    switch_client = True
+                    break
 
                 try:
                     status = await self._async_probe_stream(info)
                 except (ClientError, TimeoutError, OSError) as err:
                     last_error = err
+                    route_index += 1
                     continue
 
                 if status in _STREAM_PROBE_OK:
@@ -329,10 +354,15 @@ class PlaybackManager:
                 last_error = RuntimeError(
                     f"YouTube media URL rejected the probe with HTTP {status}"
                 )
-                # A rejected URL may be format-specific. Continue through all
-                # routes for this client before moving to the next client profile.
                 if status in _STREAM_PROBE_SWITCH_CLIENT:
-                    continue
+                    # Authentication/rate-limit failures are normally tied to
+                    # the client profile rather than one quality tier.
+                    switch_client = True
+                    break
+
+                # 403/404/410 and transient upstream failures can be tied to a
+                # specific GoogleVideo URL, so keep stepping down in quality.
+                route_index += 1
 
             if switch_client:
                 continue
@@ -665,6 +695,34 @@ def _best_thumbnail(info: dict[str, Any]) -> str | None:
 def _no_player_clients_error(error: Exception) -> bool:
     """Return whether yt-dlp ended up with an empty YouTube client set."""
     return "no player clients have been requested" in str(error).casefold()
+
+
+def _requested_format_unavailable(error: Exception) -> bool:
+    """Return whether yt-dlp says the requested quality tier does not exist."""
+    message = str(error).casefold()
+    return (
+        "requested format is not available" in message
+        or "no video formats found" in message
+        or "only images are available" in message
+    )
+
+
+def _retry_lower_stream_route(error: Exception) -> bool:
+    """Return whether a different direct media URL may recover extraction."""
+    message = str(error).casefold()
+    return (
+        "http error 403" in message
+        or "403: forbidden" in message
+        or "http error 404" in message
+        or "http error 410" in message
+        or "http error 416" in message
+        or "unable to download video data" in message
+        or "fragment" in message
+        or "timed out" in message
+        or "timeout" in message
+        or "connection reset" in message
+        or "remote end closed connection" in message
+    )
 
 
 def _stream_mime_type(ext: str, acodec: str, vcodec: str = "") -> str:

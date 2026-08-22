@@ -42,6 +42,9 @@ from .notifications import async_send_download_notifications
 _LOGGER = logging.getLogger(__name__)
 _JS_RUNTIME_UNSET = object()
 _FFMPEG_LOCATION_UNSET = object()
+_MAX_AUDIO_SOURCE_ROUTES = 32
+_MAX_MUXED_SOURCE_ROUTES = 16
+_MAX_VIDEO_SOURCE_ROUTES = 12
 _YOUTUBE_DOWNLOAD_CLIENT_PROFILES: tuple[tuple[str, ...] | None, ...] = (
     None,
     ("android_vr",),
@@ -466,11 +469,11 @@ class YoutubeDlpManager:
         os.makedirs(job_temp, exist_ok=True)
         self.hass.add_job(self._set_job_status, job.job_id, "extracting")
 
-        audio_selectors: tuple[str | None, ...]
+        source_selectors: tuple[str | None, ...]
         if request.media_type == MEDIA_TYPE_AUDIO:
-            audio_selectors = self._audio_source_selectors()
+            source_selectors = self._audio_source_selectors()
         else:
-            audio_selectors = (None,)
+            source_selectors = self._video_source_selectors(request)
 
         extracted: Any = None
         last_error: Exception | None = None
@@ -486,7 +489,10 @@ class YoutubeDlpManager:
             profile_name = (
                 "default" if player_clients is None else ",".join(player_clients)
             )
-            for attempt, audio_selector in enumerate(audio_selectors, start=1):
+            attempt_index = 0
+            while attempt_index < len(source_selectors):
+                attempt = attempt_index + 1
+                source_selector = source_selectors[attempt_index]
                 if job.cancel_event.is_set():
                     raise DownloadCancelled(
                         "Download cancelled because the integration is unloading"
@@ -496,7 +502,7 @@ class YoutubeDlpManager:
                     attempt_temp = os.path.join(
                         job_temp, f"client-{profile_index}-attempt-{attempt}"
                     )
-                elif len(audio_selectors) > 1:
+                elif len(source_selectors) > 1:
                     attempt_temp = os.path.join(job_temp, f"attempt-{attempt}")
                 else:
                     attempt_temp = job_temp
@@ -506,7 +512,7 @@ class YoutubeDlpManager:
                     attempt_temp,
                     progress_hook,
                     postprocessor_hook,
-                    audio_source_selector=audio_selector,
+                    source_selector=source_selector,
                     player_clients=player_clients,
                 )
 
@@ -525,15 +531,19 @@ class YoutubeDlpManager:
                     if self._is_no_player_clients(err):
                         break
 
-                    if self._should_retry_audio_download(
-                        request, err, attempt, len(audio_selectors)
-                    ):
-                        next_selector = audio_selectors[attempt]
+                    next_attempt_index = self._next_source_attempt_index(
+                        request,
+                        source_selectors,
+                        attempt_index,
+                        err,
+                    )
+                    if next_attempt_index is not None:
+                        next_selector = source_selectors[next_attempt_index]
                         _LOGGER.warning(
-                            "Audio source attempt %s/%s failed for job %s with "
+                            "Media source attempt %s/%s failed for job %s with "
                             "YouTube client %s (%s); retrying selector %s",
                             attempt,
-                            len(audio_selectors),
+                            len(source_selectors),
                             job.job_id,
                             profile_name,
                             self._short_error(err),
@@ -543,6 +553,7 @@ class YoutubeDlpManager:
                         self.hass.add_job(
                             self._reset_job_progress_for_retry, job.job_id
                         )
+                        attempt_index = next_attempt_index
                         continue
                     break
 
@@ -611,7 +622,7 @@ class YoutubeDlpManager:
         progress_hook: Any,
         postprocessor_hook: Any,
         *,
-        audio_source_selector: str | None = None,
+        source_selector: str | None = None,
         player_clients: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """Build controlled yt-dlp options from service fields."""
@@ -655,31 +666,47 @@ class YoutubeDlpManager:
             }
 
         if request.media_type == MEDIA_TYPE_AUDIO:
-            opts.update(self._audio_options(request, audio_source_selector))
+            opts.update(self._audio_options(request, source_selector))
         else:
-            opts.update(self._video_options(request))
+            opts.update(self._video_options(request, source_selector))
         return opts
 
     @staticmethod
     def _audio_source_selectors() -> tuple[str, ...]:
-        """Return distinct source routes for resilient YouTube audio downloads.
+        """Return best-to-lower source routes for resilient audio downloads.
 
-        YouTube can expose a DASH format successfully and still return HTTP 403
-        for its media URL. A slash-separated yt-dlp selector only falls back when
-        a format is unavailable, not when the selected media URL later returns
-        403. Keep the routes distinct so the worker can retry a different stream.
+        Each selector is a separate yt-dlp attempt so an upstream failure on the
+        best URL can really move to the second-best URL, then the third-best, and
+        so on. Muxed formats are only used after the audio-only ladder is exhausted;
+        FFmpeg then extracts the requested final audio format.
         """
-        return (
-            # M4A/MP4A is also the audio route used by our successful MP4 video
-            # downloads and is generally the least expensive audio-only fallback.
-            "ba[ext=m4a]/ba[acodec^=mp4a]",
-            # Try the independent WebM/Opus DASH route next.
-            "ba[ext=webm]/ba[acodec^=opus]",
-            # Last resort: use HLS or a progressive muxed stream and let FFmpeg
-            # extract the audio. This downloads video bytes too, but avoids a
-            # hard failure when YouTube rejects all separate DASH audio URLs.
-            "ba[protocol^=m3u8]/b[protocol^=m3u8]/b[ext=mp4]/b",
+        return tuple(
+            ["ba"]
+            + [f"ba.{index}" for index in range(2, _MAX_AUDIO_SOURCE_ROUTES + 1)]
+            + ["b"]
+            + [f"b.{index}" for index in range(2, _MAX_MUXED_SOURCE_ROUTES + 1)]
         )
+
+    @staticmethod
+    def _video_source_selectors(request: DownloadRequest) -> tuple[str, ...]:
+        """Return best-to-lower video routes while honoring the quality ceiling."""
+        height_filter = (
+            ""
+            if request.video_quality == "best"
+            else f"[height<=?{request.video_quality}]"
+        )
+
+        # Try the best separate video stream first and progressively step down.
+        # Keep best audio paired with each video tier; if a client exposes no
+        # separate tracks, the corresponding progressive ``b.N`` route remains
+        # available at each tier.
+        routes: list[str] = []
+        for index in range(1, _MAX_VIDEO_SOURCE_ROUTES + 1):
+            suffix = "" if index == 1 else f".{index}"
+            video = f"bv{suffix}{height_filter}"
+            muxed = f"b{suffix}{height_filter}"
+            routes.append(f"{video}+ba/{muxed}")
+        return tuple(routes)
 
     @staticmethod
     def _audio_options(
@@ -688,7 +715,7 @@ class YoutubeDlpManager:
         """Return yt-dlp options for an audio-only final file."""
         quality = "0" if request.audio_quality == "best" else request.audio_quality
         return {
-            "format": source_selector or "ba[ext=m4a]/ba/b",
+            "format": source_selector or "ba/b",
             "final_ext": request.audio_format,
             "postprocessors": [
                 {
@@ -720,6 +747,16 @@ class YoutubeDlpManager:
         """Return whether yt-dlp ended up with an empty YouTube client set."""
         return "no player clients have been requested" in str(error).casefold()
 
+    @staticmethod
+    def _is_requested_format_unavailable(error: Exception) -> bool:
+        """Return whether the selected quality tier does not exist."""
+        message = str(error).casefold()
+        return (
+            "requested format is not available" in message
+            or "no video formats found" in message
+            or "only images are available" in message
+        )
+
     @classmethod
     def _should_retry_client_profile(cls, error: Exception) -> bool:
         """Return whether a different positive YouTube client may recover."""
@@ -727,31 +764,89 @@ class YoutubeDlpManager:
         return (
             cls._is_http_403(error)
             or cls._is_no_player_clients(error)
-            or "requested format is not available" in message
-            or "no video formats found" in message
-            or "only images are available" in message
+            or cls._is_requested_format_unavailable(error)
+            or "http error 401" in message
+            or "http error 404" in message
+            or "http error 410" in message
+            or "http error 416" in message
+            or "http error 429" in message
+            or "too many requests" in message
+            or "unable to download video data" in message
+            or "unable to download webpage" in message
+            or "fragment" in message
+            or "timed out" in message
+            or "timeout" in message
+            or "connection reset" in message
+            or "remote end closed connection" in message
         )
 
-    @staticmethod
-    def _should_retry_audio_download(
+    @classmethod
+    def _next_source_attempt_index(
+        cls,
         request: DownloadRequest,
+        source_selectors: tuple[str | None, ...],
+        attempt_index: int,
+        error: Exception,
+    ) -> int | None:
+        """Choose the next lower source without wasting known-missing tiers."""
+        next_index = attempt_index + 1
+        if next_index >= len(source_selectors):
+            return None
+
+        if cls._is_requested_format_unavailable(error):
+            if request.media_type != MEDIA_TYPE_AUDIO:
+                # The current video selector already contains a muxed fallback.
+                # If it is unavailable, lower nth selectors cannot exist either.
+                return None
+
+            current_selector = source_selectors[attempt_index]
+            if isinstance(current_selector, str) and current_selector.startswith("ba"):
+                # No ba.N means no lower audio-only ba.(N+1) can exist. Jump to
+                # the best muxed/progressive route and let FFmpeg extract audio.
+                for index in range(next_index, len(source_selectors)):
+                    selector = source_selectors[index]
+                    if (
+                        isinstance(selector, str)
+                        and selector.startswith("b")
+                        and not selector.startswith("ba")
+                    ):
+                        return index
+            return None
+
+        if cls._should_retry_source_download(
+            error, attempt_index + 1, len(source_selectors)
+        ):
+            return next_index
+        return None
+
+    @staticmethod
+    def _should_retry_source_download(
         error: Exception,
         attempt: int,
         total_attempts: int,
     ) -> bool:
-        """Return whether an audio failure should try another source route."""
-        if request.media_type != MEDIA_TYPE_AUDIO or attempt >= total_attempts:
+        """Return whether a failed media URL should try a lower-quality route."""
+        if attempt >= total_attempts:
             return False
 
         message = str(error).casefold()
         return (
             "http error 403" in message
+            or "http error 404" in message
+            or "http error 410" in message
+            or "http error 416" in message
             or "403: forbidden" in message
             or "requested format is not available" in message
+            or "unable to download video data" in message
+            or "fragment" in message
+            or "timed out" in message
+            or "timeout" in message
+            or "connection reset" in message
+            or "remote end closed connection" in message
         )
 
     def _reset_job_progress_for_retry(self, job_id: str) -> None:
-        """Clear stale byte counters before a different audio source retry."""
+        """Clear stale byte counters before a different media source retry."""
         job = self.jobs.get(job_id)
         if job is None:
             return
@@ -765,12 +860,14 @@ class YoutubeDlpManager:
         self.async_publish_state()
 
     @staticmethod
-    def _video_options(request: DownloadRequest) -> dict[str, Any]:
+    def _video_options(
+        request: DownloadRequest, source_selector: str | None = None
+    ) -> dict[str, Any]:
         """Return yt-dlp options for a merged video final file."""
         height_filter = (
             ""
             if request.video_quality == "best"
-            else f"[height<={request.video_quality}]"
+            else f"[height<=?{request.video_quality}]"
         )
 
         if request.video_format == "mp4":
@@ -779,19 +876,23 @@ class YoutubeDlpManager:
             # 1440p/2160p request at 1080p even when a higher MP4 stream exists.
             selector = (
                 f"bv[ext=mp4]{height_filter}+ba[ext=m4a]/"
-                f"b[ext=mp4]{height_filter}"
+                f"b[ext=mp4]{height_filter}/"
+                f"bv{height_filter}+ba/"
+                f"b{height_filter}"
             )
         elif request.video_format == "webm":
             selector = (
                 f"bv[ext=webm]{height_filter}+ba[ext=webm]/"
-                f"b[ext=webm]{height_filter}"
+                f"b[ext=webm]{height_filter}/"
+                f"bv{height_filter}+ba/"
+                f"b{height_filter}"
             )
         else:
             # Matroska accepts the widest range of YouTube codecs.
             selector = f"bv{height_filter}+ba/b{height_filter}"
 
         return {
-            "format": selector,
+            "format": source_selector or selector,
             "merge_output_format": request.video_format,
             "final_ext": request.video_format,
             "postprocessors": [
