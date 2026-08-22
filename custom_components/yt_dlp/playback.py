@@ -75,7 +75,6 @@ class StreamInfo:
     webpage_url: str
     http_headers: dict[str, str]
     route_index: int
-    avoid_android_vr: bool
 
     def as_dict(self) -> dict[str, Any]:
         """Return only user-facing, JSON-safe response data."""
@@ -137,8 +136,6 @@ class PlaybackManager:
         self,
         url: str,
         route_indexes: tuple[int, ...] | None = None,
-        *,
-        avoid_android_vr: bool = False,
     ) -> StreamInfo:
         """Resolve one usable upstream route without downloading the media."""
         indexes = route_indexes or tuple(range(len(STREAM_FORMAT_SELECTORS)))
@@ -150,7 +147,6 @@ class PlaybackManager:
                 url,
                 youtube_dl_cls,
                 indexes,
-                avoid_android_vr,
             )
 
     def _resolve_stream_sync(
@@ -158,7 +154,6 @@ class PlaybackManager:
         url: str,
         youtube_dl_cls: type[Any],
         route_indexes: tuple[int, ...],
-        avoid_android_vr: bool,
     ) -> StreamInfo:
         """Blocking yt-dlp metadata extraction. Executor thread only."""
         from yt_dlp.utils import DownloadError
@@ -180,16 +175,6 @@ class PlaybackManager:
             }
             if js_runtimes := self._js_runtime_options():
                 opts["js_runtimes"] = js_runtimes
-            if avoid_android_vr:
-                # Keep yt-dlp's own current default client selection and only
-                # remove android_vr. This is deliberately better than pinning
-                # visionos/web_embedded: the available formats and fallback
-                # clients vary by video, authentication state and JS runtime.
-                # yt-dlp 2026.08.19 explicitly supports ``default,-CLIENT``.
-                opts["extractor_args"] = {
-                    "youtube": {"player_client": ["default", "-android_vr"]}
-                }
-
             try:
                 with youtube_dl_cls(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -249,7 +234,6 @@ class PlaybackManager:
                         webpage_url=webpage_url,
                         http_headers=headers,
                         route_index=route_index,
-                        avoid_android_vr=avoid_android_vr,
                     )
             except DownloadError as err:
                 last_error = err
@@ -299,7 +283,6 @@ class PlaybackManager:
         token: str,
         *,
         advance_route: bool,
-        avoid_android_vr: bool | None = None,
     ) -> StreamSession | None:
         """Refresh an expired/rejected upstream URL, optionally changing route/client."""
         session = self.get_stream_session(token)
@@ -323,11 +306,6 @@ class PlaybackManager:
         info = await self.async_resolve_stream(
             session.source_url,
             indexes,
-            avoid_android_vr=(
-                session.info.avoid_android_vr
-                if avoid_android_vr is None
-                else avoid_android_vr
-            ),
         )
         session.info = info
         session.last_access = time.monotonic()
