@@ -16,6 +16,7 @@ class YtDlpMediaCard extends HTMLElement {
     this._favoritesLoaded = false;
     this._favoritesLoading = false;
     this._favoritesPage = 1;
+    this._favoritesScrollTop = { online: 0, offline: 0 };
     this._onlineQuery = "";
     this._onlineSelected = new Set();
     this._library = [];
@@ -712,7 +713,7 @@ class YtDlpMediaCard extends HTMLElement {
           </div>
           ${this._renderSelectionToolbar("online", this._onlineSelected.size, this._favorites.length)}
           <div class="favorite-meta"><span>Danh sách được lưu trong Home Assistant</span><span>${filtered.length} / ${this._favorites.length} bài</span></div>
-          <div class="favorite-list">
+          <div class="favorite-list" data-favorites-list="online">
             ${this._favoritesLoading && !this._favoritesLoaded ? `<div class="empty">${this._icon("loading")} Đang tải danh sách yêu thích...</div>` : ""}
             ${!this._favoritesLoading && this._favoritesLoaded && !filtered.length ? `<div class="empty">${this._icon("heart-outline")} Chưa có bài Online yêu thích.</div>` : ""}
             ${page.items.map(({ item, index }) => {
@@ -750,7 +751,7 @@ class YtDlpMediaCard extends HTMLElement {
           </div>
           ${this._renderSelectionToolbar("offline", this._offlineSelected.size, this._library.length)}
           <div class="favorite-meta"><span>${this._escape(this._libraryPath || "Thư mục thư viện")}</span><span>${filtered.length} / ${this._library.length} bài</span></div>
-          <div class="favorite-list">
+          <div class="favorite-list" data-favorites-list="offline">
             ${this._libraryLoading && !this._libraryLoaded ? `<div class="empty">${this._icon("loading")} Đang quét thư viện...</div>` : ""}
             ${!this._libraryLoading && this._libraryLoaded && !filtered.length ? `<div class="empty">${this._icon("music-off")} Không tìm thấy file nhạc.</div>` : ""}
             ${page.items.map(({ item, index }) => {
@@ -938,8 +939,27 @@ class YtDlpMediaCard extends HTMLElement {
       </section>`;
   }
 
+  _captureFavoritesScroll() {
+    const list = this.shadowRoot?.querySelector("[data-favorites-list]");
+    const kind = list?.dataset?.favoritesList;
+    if (!list || !["online", "offline"].includes(kind)) return;
+    this._favoritesScrollTop[kind] = list.scrollTop;
+  }
+
+  _restoreFavoritesScroll() {
+    if (this._view !== "favorites") return;
+    const kind = this._favoritesTab;
+    const list = this.shadowRoot?.querySelector(`[data-favorites-list="${kind}"]`);
+    if (!list) return;
+    list.scrollTop = Math.max(0, Number(this._favoritesScrollTop[kind]) || 0);
+  }
+
   _render() {
     if (!this.shadowRoot) return;
+    // Favorites controls re-render the card. Preserve the list viewport before
+    // replacing Shadow DOM so selecting/repeating/stopping/removing a row does
+    // not jump the user back to the first favorite. This is UI state only.
+    this._captureFavoritesScroll();
     const state = this._state();
     const players = this._players();
     const isPlaying = state?.state === "playing";
@@ -1037,6 +1057,7 @@ class YtDlpMediaCard extends HTMLElement {
       </ha-card>`;
 
     this._bindEvents();
+    this._restoreFavoritesScroll();
   }
 
   _syncSpeakerPicker() {
@@ -1178,10 +1199,11 @@ class YtDlpMediaCard extends HTMLElement {
     $("refreshFavorites")?.addEventListener("click", () => this._loadFavorites());
     $("refreshLibrary")?.addEventListener("click", () => this._loadLibrary(true));
 
-    const bindSearch = (id, field, pageField) => {
+    const bindSearch = (id, field, pageField, favoritesKind) => {
       $(id)?.addEventListener("input", (event) => {
         this[field] = event.target.value;
         this[pageField] = 1;
+        if (["online", "offline"].includes(favoritesKind)) this._favoritesScrollTop[favoritesKind] = 0;
         const value = event.target.value;
         this._render();
         const search = this.shadowRoot.getElementById(id);
@@ -1191,8 +1213,8 @@ class YtDlpMediaCard extends HTMLElement {
         }
       });
     };
-    bindSearch("onlineSearch", "_onlineQuery", "_favoritesPage");
-    bindSearch("offlineSearch", "_offlineQuery", "_libraryPage");
+    bindSearch("onlineSearch", "_onlineQuery", "_favoritesPage", "online");
+    bindSearch("offlineSearch", "_offlineQuery", "_libraryPage", "offline");
 
     this.shadowRoot.querySelectorAll("[data-online-index]").forEach((button) => {
       button.addEventListener("click", () => this._playFavorite(Number(button.dataset.onlineIndex), false));
@@ -1222,8 +1244,14 @@ class YtDlpMediaCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-page-kind]").forEach((button) => {
       button.addEventListener("click", () => {
         const page = Number(button.dataset.page) || 1;
-        if (button.dataset.pageKind === "favorites-online") this._favoritesPage = page;
-        if (button.dataset.pageKind === "favorites-offline") this._libraryPage = page;
+        if (button.dataset.pageKind === "favorites-online") {
+          this._favoritesPage = page;
+          this._favoritesScrollTop.online = 0;
+        }
+        if (button.dataset.pageKind === "favorites-offline") {
+          this._libraryPage = page;
+          this._favoritesScrollTop.offline = 0;
+        }
         this._render();
       });
     });
@@ -1488,6 +1516,7 @@ class YtDlpMediaCard extends HTMLElement {
       this._favorites = [item, ...this._favorites.filter((entry) => entry.url !== item.url)];
       this._favoritesLoaded = true;
       this._favoritesPage = 1;
+      this._favoritesScrollTop.online = 0;
       if (this._favoriteUrl.trim() === url) this._favoriteUrl = "";
       this._notify(`Đã thêm Yêu thích: ${item.title || "YouTube audio"}`);
     } catch (error) {
