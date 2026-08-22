@@ -57,8 +57,8 @@ MAX_STREAM_SESSIONS = 32
 # it does not switch routes when a selected YouTube media URL later returns 403.
 STREAM_FORMAT_SELECTORS = (
     "ba[ext=m4a]/ba[acodec^=mp4a]",
-    "18/b[ext=mp4]/b",
     "ba[ext=webm]/ba[acodec^=opus]",
+    "b[ext=mp4]/b",
 )
 
 
@@ -180,85 +180,83 @@ class PlaybackManager:
             }
             if js_runtimes := self._js_runtime_options():
                 opts["js_runtimes"] = js_runtimes
-            # A multi-client extractor chain can mix player responses and media
-            # URLs. In particular, yt-dlp has seen web_embedded/visionos chains
-            # end up with an ANDROID_VR googlevideo URL. When a non-VR retry is
-            # requested, try each safe client independently instead of combining
-            # them in one extraction. This also lets us fall through to the next
-            # format route if a client does not expose that format.
-            player_clients: tuple[str | None, ...] = (None,)
             if avoid_android_vr:
-                player_clients = ("visionos", "web_embedded")
+                # Do not use ``default,-android_vr`` here. yt-dlp resolves
+                # ``default`` dynamically and, for some runtime/client
+                # combinations, removing one client can leave an empty client
+                # set and raise "No player clients have been requested".
+                #
+                # yt-dlp 2026.08.19 uses visionOS as its JS-less playback
+                # default, while Android VR is known to return unusable/403
+                # media URLs. Add web_embedded as a secondary explicit client
+                # so made-for-kids videos still have a non-VR route when the
+                # primary client is unavailable.
+                opts["extractor_args"] = {
+                    "youtube": {"player_client": ["visionos", "web_embedded"]}
+                }
 
-            for player_client in player_clients:
-                client_opts = dict(opts)
-                if player_client is not None:
-                    client_opts["extractor_args"] = {
-                        "youtube": {"player_client": [player_client]}
-                    }
+            try:
+                with youtube_dl_cls(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if not isinstance(info, dict):
+                        raise DownloadError("yt-dlp did not return media information")
 
-                try:
-                    with youtube_dl_cls(client_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        if not isinstance(info, dict):
-                            raise DownloadError("yt-dlp did not return media information")
-
-                        stream_url = info.get("url")
-                        if not isinstance(stream_url, str) or not stream_url.startswith(
-                            ("http://", "https://")
-                        ):
-                            raise DownloadError(
-                                "yt-dlp did not return a playable direct media URL"
-                            )
-
-                        headers: dict[str, str] = {}
-                        raw_headers = info.get("http_headers")
-                        if hasattr(raw_headers, "items"):
-                            headers.update(
-                                {
-                                    str(key): str(value)
-                                    for key, value in raw_headers.items()
-                                    if value is not None
-                                }
-                            )
-                        # yt-dlp intentionally keeps cookies out of http_headers.
-                        # Capture only the cookies scoped to this selected media URL.
-                        try:
-                            cookie_header = ydl.cookiejar.get_cookie_header(stream_url)
-                        except (AttributeError, ValueError):
-                            cookie_header = None
-                        if cookie_header:
-                            headers["Cookie"] = str(cookie_header)
-
-                        ext = str(info.get("ext") or "").lower()
-                        acodec = str(info.get("acodec") or "").lower()
-                        mime_type = _stream_mime_type(ext, acodec)
-                        thumbnail = _best_thumbnail(info)
-                        title = str(
-                            info.get("title") or info.get("fulltitle") or "YouTube audio"
-                        )
-                        artist_value = (
-                            info.get("artist") or info.get("channel") or info.get("uploader")
-                        )
-                        artist = str(artist_value) if artist_value else None
-                        webpage_url = str(
-                            info.get("webpage_url") or info.get("original_url") or url
+                    stream_url = info.get("url")
+                    if not isinstance(stream_url, str) or not stream_url.startswith(
+                        ("http://", "https://")
+                    ):
+                        raise DownloadError(
+                            "yt-dlp did not return a playable direct media URL"
                         )
 
-                        return StreamInfo(
-                            url=stream_url,
-                            title=title,
-                            thumbnail=thumbnail,
-                            artist=artist,
-                            duration=info.get("duration"),
-                            mime_type=mime_type,
-                            webpage_url=webpage_url,
-                            http_headers=headers,
-                            route_index=route_index,
-                            avoid_android_vr=avoid_android_vr,
+                    headers: dict[str, str] = {}
+                    raw_headers = info.get("http_headers")
+                    if hasattr(raw_headers, "items"):
+                        headers.update(
+                            {
+                                str(key): str(value)
+                                for key, value in raw_headers.items()
+                                if value is not None
+                            }
                         )
-                except DownloadError as err:
-                    last_error = err
+                    # yt-dlp intentionally keeps cookies out of http_headers.
+                    # Capture only the cookies scoped to this selected media URL.
+                    try:
+                        cookie_header = ydl.cookiejar.get_cookie_header(stream_url)
+                    except (AttributeError, ValueError):
+                        cookie_header = None
+                    if cookie_header:
+                        headers["Cookie"] = str(cookie_header)
+
+                    ext = str(info.get("ext") or "").lower()
+                    acodec = str(info.get("acodec") or "").lower()
+                    mime_type = _stream_mime_type(ext, acodec)
+                    thumbnail = _best_thumbnail(info)
+                    title = str(
+                        info.get("title") or info.get("fulltitle") or "YouTube audio"
+                    )
+                    artist_value = (
+                        info.get("artist") or info.get("channel") or info.get("uploader")
+                    )
+                    artist = str(artist_value) if artist_value else None
+                    webpage_url = str(
+                        info.get("webpage_url") or info.get("original_url") or url
+                    )
+
+                    return StreamInfo(
+                        url=stream_url,
+                        title=title,
+                        thumbnail=thumbnail,
+                        artist=artist,
+                        duration=info.get("duration"),
+                        mime_type=mime_type,
+                        webpage_url=webpage_url,
+                        http_headers=headers,
+                        route_index=route_index,
+                        avoid_android_vr=avoid_android_vr,
+                    )
+            except DownloadError as err:
+                last_error = err
 
         if last_error is not None:
             raise last_error
@@ -268,15 +266,25 @@ class PlaybackManager:
         """Create a Home Assistant Media Source ID for one remote stream."""
         info = await self.async_resolve_stream(url)
 
-        # Do not proactively replace an ANDROID_VR URL here. On current YouTube
-        # rollouts that client can still be the only route exposing a compatible
-        # direct format, and forcing another client can fail before Home Assistant
-        # even starts playback with "Requested format is not available". The HA
-        # relay probes the URL and only falls back after a real 401/403/404/410.
+        # yt-dlp 2026 has seen intermittent android_vr GVS 403 regressions. The
+        # normal/default extraction remains first, matching the known-good
+        # integration. If the selected media URL itself identifies ANDROID_VR,
+        # re-resolve once with that client excluded before handing the relay to a
+        # speaker. This is network work only when the user presses Play.
         if _is_android_vr_stream_url(info.url):
-            _LOGGER.debug(
-                "YouTube selected an android_vr playback URL; the relay will "
-                "probe it first and use fallback routes only if it is rejected"
+            _LOGGER.warning(
+                "YouTube selected an android_vr playback URL; resolving a "
+                "non-android_vr route before sending media to the player"
+            )
+            safe_routes = (info.route_index,) + tuple(
+                index
+                for index in range(len(STREAM_FORMAT_SELECTORS))
+                if index != info.route_index
+            )
+            info = await self.async_resolve_stream(
+                url,
+                safe_routes,
+                avoid_android_vr=True,
             )
 
         now = time.monotonic()
