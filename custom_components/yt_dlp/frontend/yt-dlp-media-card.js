@@ -38,6 +38,7 @@ class YtDlpMediaCard extends HTMLElement {
     this._interruptedPlayback = null;
     this._interruptionCandidate = null;
     this._interruptionCandidateTimer = null;
+    this._resumeIdleTimer = null;
     this._resumeInFlight = false;
     this._speakerSelectionRestored = false;
     this._busy = false;
@@ -1353,8 +1354,14 @@ class YtDlpMediaCard extends HTMLElement {
     this._interruptionCandidate = null;
   }
 
+  _clearResumeIdleTimer() {
+    if (this._resumeIdleTimer) window.clearTimeout(this._resumeIdleTimer);
+    this._resumeIdleTimer = null;
+  }
+
   _clearPlaybackInterruption() {
     this._clearInterruptionCandidate();
+    this._clearResumeIdleTimer();
     this._interruptedPlayback = null;
     this._resumeInFlight = false;
   }
@@ -1362,22 +1369,41 @@ class YtDlpMediaCard extends HTMLElement {
   _captureInterruptedPlayback(state) {
     if (!this._activePlayback) return null;
     const { position, duration } = this._position(state);
+    const attrs = state?.attributes || {};
     return {
       source: { ...this._activePlayback },
       position,
       duration,
       identity: this._mediaIdentity(state),
+      media: {
+        contentId: attrs.media_content_id || "",
+        title: attrs.media_title || "",
+        artist: attrs.media_artist || "",
+        album: attrs.media_album_name || "",
+      },
     };
+  }
+
+  _matchesInterruptedMedia(state, interrupted) {
+    if (!state || !interrupted) return false;
+    if (this._mediaIdentity(state) === interrupted.identity) return true;
+    const attrs = state.attributes || {};
+    const saved = interrupted.media || {};
+    if (saved.contentId && attrs.media_content_id && saved.contentId === attrs.media_content_id) return true;
+    if (!saved.title || attrs.media_title !== saved.title) return false;
+    if (saved.artist && attrs.media_artist && saved.artist !== attrs.media_artist) return false;
+    return true;
   }
 
   _beginPlaybackInterruption(snapshot) {
     if (!snapshot || this._interruptedPlayback || this._resumeInFlight) return;
     this._clearInterruptionCandidate();
+    this._clearResumeIdleTimer();
     this._interruptedPlayback = snapshot;
     if (this._queue) this._queue.started = false;
   }
 
-  _deferPossibleInterruption(snapshot, delay = 2500) {
+  _deferPossibleInterruption(snapshot, delay = 7000) {
     this._clearInterruptionCandidate();
     this._interruptionCandidate = snapshot;
     this._interruptionCandidateTimer = window.setTimeout(() => {
@@ -1395,24 +1421,90 @@ class YtDlpMediaCard extends HTMLElement {
   }
 
   async _waitForPlaybackStart() {
-    for (let attempt = 0; attempt < 25; attempt += 1) {
-      if (["playing", "buffering"].includes(this._state()?.state)) return true;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (this._state()?.state === "playing") return true;
       await new Promise((resolve) => window.setTimeout(resolve, 200));
     }
-    return false;
+    return ["playing", "buffering"].includes(this._state()?.state);
+  }
+
+  _scheduleInterruptedResume(delay = 900) {
+    if (!this._interruptedPlayback || this._resumeInFlight || this._queueStopRequested) return;
+    this._clearResumeIdleTimer();
+    this._resumeIdleTimer = window.setTimeout(() => {
+      this._resumeIdleTimer = null;
+      if (!this._interruptedPlayback || this._resumeInFlight || this._queueStopRequested) return;
+      if (this._state()?.state !== "idle") return;
+      this._resumeInterruptedPlayback();
+    }, delay);
+  }
+
+  async _seekInterruptedPosition(interrupted) {
+    if (!(await this._waitForPlaybackStart())) {
+      throw new Error("Loa chưa sẵn sàng để khôi phục vị trí phát");
+    }
+    const seekPosition = Math.max(0, Number(interrupted?.position) || 0);
+    const selectedPlayers = this._targetPlayers();
+    if (!selectedPlayers.length || !this._hass) throw new Error("Không tìm thấy loa để khôi phục nhạc");
+    let lastError = null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await this._hass.callService(
+          "media_player",
+          "media_seek",
+          { seek_position: seekPosition },
+          { entity_id: selectedPlayers.length === 1 ? selectedPlayers[0] : selectedPlayers }
+        );
+        return true;
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolve) => window.setTimeout(resolve, 350 * (attempt + 1)));
+      }
+    }
+    throw lastError || new Error("Không thể khôi phục vị trí phát");
+  }
+
+  async _resumeAutoRestoredPlayback() {
+    const interrupted = this._interruptedPlayback;
+    if (!interrupted || this._resumeInFlight || this._queueStopRequested) return;
+    this._resumeInFlight = true;
+    this._clearResumeIdleTimer();
+    try {
+      await this._seekInterruptedPosition(interrupted);
+      if (this._interruptedPlayback === interrupted) this._interruptedPlayback = null;
+      this._activePlayback = { ...interrupted.source };
+      if (this._queue) {
+        this._queue.started = true;
+        this._queueStartedAt = Date.now();
+      }
+    } catch (error) {
+      this._notify(`Không thể khôi phục đúng vị trí nhạc sau thông báo: ${error?.message || error}`);
+    } finally {
+      this._resumeInFlight = false;
+    }
   }
 
   async _resumeInterruptedPlayback() {
     const interrupted = this._interruptedPlayback;
     if (!interrupted || this._resumeInFlight || this._queueStopRequested) return;
+    if (this._state()?.state !== "idle") return;
     this._resumeInFlight = true;
-    this._interruptedPlayback = null;
+    this._clearResumeIdleTimer();
     try {
       const source = interrupted.source;
       if (source.kind === "online") {
         const index = this._favorites.findIndex((item) => item.url === source.url);
-        if (index < 0) return;
-        await this._playFavorite(index, true);
+        if (index >= 0) {
+          await this._playFavorite(index, true);
+        } else {
+          const selectedPlayers = this._targetPlayers();
+          if (!source.url || !selectedPlayers.length) return;
+          const response = selectedPlayers.length > 1
+            ? await this._callServiceResponse("yt_dlp", "play_multi", { url: source.url, media_players: selectedPlayers })
+            : await this._callServiceResponse("yt_dlp", "play", { url: source.url, media_player: this._selectedPlayer });
+          this._nowPlaying = response || this._nowPlaying || { title: "YouTube audio", url: source.url };
+          this._activePlayback = { kind: "online", url: source.url };
+        }
       } else if (source.kind === "offline") {
         const index = this._library.findIndex((item) => item.id === source.id);
         if (index < 0) return;
@@ -1434,9 +1526,8 @@ class YtDlpMediaCard extends HTMLElement {
         }
       }
 
-      if (await this._waitForPlaybackStart()) {
-        await this._callMediaService("media_seek", { seek_position: Math.max(0, interrupted.position) });
-      }
+      await this._seekInterruptedPosition(interrupted);
+      if (this._interruptedPlayback === interrupted) this._interruptedPlayback = null;
       if (this._queue) {
         this._queue.started = true;
         this._queueStartedAt = Date.now();
@@ -1455,19 +1546,20 @@ class YtDlpMediaCard extends HTMLElement {
     const queue = this._queue;
 
     if (this._interruptedPlayback) {
-      if (current === "playing" && this._mediaIdentity(currentState) === this._interruptedPlayback.identity) {
-        this._interruptedPlayback = null;
-        if (queue) queue.started = true;
+      if (["playing", "buffering"].includes(current) && this._matchesInterruptedMedia(currentState, this._interruptedPlayback)) {
+        queueMicrotask(() => this._resumeAutoRestoredPlayback());
         return;
       }
-      if (["idle", "off", "standby"].includes(current)) {
-        queueMicrotask(() => this._resumeInterruptedPlayback());
+      if (current === "idle") {
+        this._scheduleInterruptedResume();
+      } else {
+        this._clearResumeIdleTimer();
       }
       return;
     }
 
     if (this._interruptionCandidate) {
-      if (current === "playing") {
+      if (["playing", "buffering"].includes(current)) {
         const candidate = this._interruptionCandidate;
         if (this._mediaIdentity(currentState) !== candidate.identity) {
           this._beginPlaybackInterruption(candidate);
