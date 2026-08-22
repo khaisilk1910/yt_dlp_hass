@@ -58,6 +58,16 @@ class DownloadRequest:
 
 
 @dataclass(slots=True)
+class DownloadProgressPart:
+    """Progress snapshot for one yt-dlp media stream."""
+
+    downloaded_bytes: int = 0
+    total_bytes: int | None = None
+    speed: float | None = None
+    finished: bool = False
+
+
+@dataclass(slots=True)
 class DownloadJob:
     """Runtime information for one download."""
 
@@ -71,8 +81,12 @@ class DownloadJob:
     title: str | None = None
     downloaded_bytes: int = 0
     total_bytes: int | None = None
+    progress: float | None = None
     speed: float | None = None
     eta: float | None = None
+    expected_parts: int = 1
+    planned_total_bytes: int | None = None
+    progress_parts: dict[str, DownloadProgressPart] = field(default_factory=dict, repr=False)
     final_files: list[str] = field(default_factory=list)
     error: str | None = None
     metadata_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -248,6 +262,7 @@ class YoutubeDlpManager:
             if result.final_size is not None:
                 job.downloaded_bytes = result.final_size
                 job.total_bytes = result.final_size
+            job.progress = 100.0
             job.speed = job.speed or 0
             job.eta = 0
             job.error = None
@@ -305,6 +320,7 @@ class YoutubeDlpManager:
             # (formats, thumbnails, manifests, etc.). Do not queue that large
             # object onto Home Assistant's event loop every second.
             info = data.get("info_dict") or {}
+            expected_parts, planned_total_bytes = self._progress_plan(info)
             compact = {
                 "status": data.get("status"),
                 "filename": data.get("filename"),
@@ -314,6 +330,12 @@ class YoutubeDlpManager:
                 "total_bytes_estimate": data.get("total_bytes_estimate"),
                 "speed": data.get("speed"),
                 "eta": data.get("eta"),
+                "progress_idx": data.get("progress_idx"),
+                "max_progress": data.get("max_progress"),
+                "ctx_id": data.get("ctx_id"),
+                "expected_parts": expected_parts,
+                "planned_total_bytes": planned_total_bytes,
+                "format_id": info.get("format_id") if isinstance(info, Mapping) else None,
                 "title": info.get("title") if isinstance(info, Mapping) else None,
                 "info_filename": (
                     info.get("filename") if isinstance(info, Mapping) else None
@@ -588,6 +610,164 @@ class YoutubeDlpManager:
             or "requested format is not available" in message
         )
 
+    @staticmethod
+    def _progress_plan(info: Any) -> tuple[int | None, int | None]:
+        """Return selected stream count and total source bytes when yt-dlp knows them."""
+        if not isinstance(info, Mapping):
+            return None, None
+
+        requested = info.get("requested_formats")
+        if not isinstance(requested, (list, tuple)) or not requested:
+            format_id = str(info.get("format_id") or "")
+            part_ids = [item for item in format_id.split("+") if item]
+            return (len(part_ids), None) if len(part_ids) > 1 else (None, None)
+
+        total = 0
+        all_sizes_known = True
+        count = 0
+        for item in requested:
+            if not isinstance(item, Mapping):
+                continue
+            count += 1
+            raw_size = item.get("filesize") or item.get("filesize_approx")
+            try:
+                size = int(raw_size) if raw_size is not None else 0
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                total += size
+            else:
+                all_sizes_known = False
+
+        if count < 1:
+            return None, None
+        return count, total if all_sizes_known and total > 0 else None
+
+    @staticmethod
+    def _progress_part_key(data: Mapping[str, Any]) -> str:
+        """Build a stable key for separate video/audio or parallel media streams."""
+        filename = data.get("filename") or data.get("tmpfilename")
+        progress_idx = data.get("progress_idx")
+        max_progress = data.get("max_progress")
+        if progress_idx is not None and max_progress:
+            return f"parallel:{progress_idx}:{filename or ''}"
+
+        if filename:
+            return f"file:{filename}"
+
+        ctx_id = data.get("ctx_id")
+        if ctx_id is not None:
+            return f"ctx:{ctx_id}"
+
+        format_id = data.get("format_id")
+        if format_id:
+            return f"format:{format_id}"
+        return "stream:0"
+
+    @staticmethod
+    def _positive_int(value: Any) -> int | None:
+        """Return a positive integer or None for unreliable progress metadata."""
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    def _update_job_transfer_progress(
+        self, job: DownloadJob, data: Mapping[str, Any], *, finished: bool
+    ) -> None:
+        """Aggregate yt-dlp stream callbacks into one monotonic transfer progress."""
+        expected_parts = self._positive_int(data.get("expected_parts"))
+        max_progress = self._positive_int(data.get("max_progress"))
+        if expected_parts:
+            job.expected_parts = max(job.expected_parts, expected_parts)
+        if max_progress:
+            job.expected_parts = max(job.expected_parts, max_progress)
+
+        planned_total = self._positive_int(data.get("planned_total_bytes"))
+        if planned_total:
+            job.planned_total_bytes = planned_total
+
+        key = self._progress_part_key(data)
+        part = job.progress_parts.get(key)
+        if part is None:
+            part = DownloadProgressPart()
+            job.progress_parts[key] = part
+
+        downloaded = max(0, int(data.get("downloaded_bytes") or 0))
+        total = self._positive_int(
+            data.get("total_bytes") or data.get("total_bytes_estimate")
+        )
+        part.downloaded_bytes = max(part.downloaded_bytes, downloaded)
+        if total is not None:
+            part.total_bytes = max(part.total_bytes or 0, total)
+        if finished:
+            part.finished = True
+            if part.total_bytes is None and part.downloaded_bytes > 0:
+                part.total_bytes = part.downloaded_bytes
+            elif part.total_bytes is not None:
+                part.downloaded_bytes = max(part.downloaded_bytes, part.total_bytes)
+
+        raw_speed = data.get("speed")
+        try:
+            part.speed = float(raw_speed) if raw_speed else None
+        except (TypeError, ValueError):
+            part.speed = None
+
+        aggregate_downloaded = sum(
+            max(0, item.downloaded_bytes) for item in job.progress_parts.values()
+        )
+        known_totals = [
+            item.total_bytes
+            for item in job.progress_parts.values()
+            if item.total_bytes is not None and item.total_bytes > 0
+        ]
+        all_expected_parts_seen = len(job.progress_parts) >= max(1, job.expected_parts)
+
+        aggregate_total: int | None = None
+        if (
+            job.planned_total_bytes is not None
+            and job.planned_total_bytes >= aggregate_downloaded
+        ):
+            aggregate_total = job.planned_total_bytes
+        elif all_expected_parts_seen and len(known_totals) == len(job.progress_parts):
+            aggregate_total = sum(known_totals)
+
+        if aggregate_total and aggregate_total > 0:
+            transfer_progress = aggregate_downloaded * 100.0 / aggregate_total
+        else:
+            # When yt-dlp does not expose every stream's byte size in advance,
+            # combine each stream's own progress. Unseen streams contribute 0%,
+            # so finishing video cannot falsely show 100% while audio is pending.
+            stage_sum = 0.0
+            for item in job.progress_parts.values():
+                if item.finished:
+                    stage_sum += 1.0
+                elif item.total_bytes and item.total_bytes > 0:
+                    stage_sum += min(0.999, item.downloaded_bytes / item.total_bytes)
+            transfer_progress = 100.0 * stage_sum / max(
+                job.expected_parts, len(job.progress_parts), 1
+            )
+
+        job.downloaded_bytes = aggregate_downloaded
+        job.total_bytes = aggregate_total
+        # 100% is reserved for the actual completed job. yt-dlp's "finished"
+        # callback means a source stream finished and post-processing may remain.
+        job.progress = round(max(0.0, min(99.0, transfer_progress)), 2)
+
+        active_speeds = [
+            item.speed for item in job.progress_parts.values() if item.speed and not item.finished
+        ]
+        job.speed = sum(active_speeds) if active_speeds else None
+        if aggregate_total and job.speed and job.speed > 0:
+            job.eta = max(0.0, (aggregate_total - aggregate_downloaded) / job.speed)
+        else:
+            raw_eta = data.get("eta")
+            try:
+                job.eta = float(raw_eta) if raw_eta is not None and not finished else None
+            except (TypeError, ValueError):
+                job.eta = None
+
     def _reset_job_progress_for_retry(self, job_id: str) -> None:
         """Clear stale byte counters before a different audio source retry."""
         job = self.jobs.get(job_id)
@@ -597,8 +777,12 @@ class YoutubeDlpManager:
         job.filename = None
         job.downloaded_bytes = 0
         job.total_bytes = None
+        job.progress = None
         job.speed = None
         job.eta = None
+        job.expected_parts = 1
+        job.planned_total_bytes = None
+        job.progress_parts.clear()
         self.async_publish_state()
 
     @staticmethod
@@ -752,16 +936,18 @@ class YoutubeDlpManager:
         status = data.get("status")
         if status == "downloading":
             job.status = "downloading"
-            job.downloaded_bytes = int(data.get("downloaded_bytes") or 0)
-            total = data.get("total_bytes") or data.get("total_bytes_estimate")
-            job.total_bytes = int(total) if total else None
-            speed = data.get("speed")
-            job.speed = float(speed) if speed else None
-            eta = data.get("eta")
-            job.eta = float(eta) if eta is not None else None
+            self._update_job_transfer_progress(job, data, finished=False)
             job.metadata_ready.set()
         elif status == "finished":
-            job.status = "postprocessing"
+            self._update_job_transfer_progress(job, data, finished=True)
+            all_streams_finished = (
+                len(job.progress_parts) >= max(1, job.expected_parts)
+                and all(part.finished for part in job.progress_parts.values())
+            )
+            job.status = "postprocessing" if all_streams_finished else "downloading"
+            if all_streams_finished:
+                job.speed = None
+                job.eta = None
             job.metadata_ready.set()
         elif status == "error":
             job.status = "error"
@@ -777,6 +963,9 @@ class YoutubeDlpManager:
             return
         if data.get("status") in ("started", "processing"):
             job.status = "postprocessing"
+            job.progress = 99.0
+            job.speed = None
+            job.eta = None
         self.async_publish_state()
 
     @callback
@@ -824,9 +1013,9 @@ class YoutubeDlpManager:
     @staticmethod
     def job_response(job: DownloadJob) -> dict[str, Any]:
         """Convert a job to a JSON-safe action/state response."""
-        progress: float | None = None
-        if job.total_bytes and job.total_bytes > 0:
-            progress = round(min(100.0, job.downloaded_bytes * 100 / job.total_bytes), 2)
+        progress = job.progress
+        if job.status == "completed":
+            progress = 100.0
         return {
             "job_id": job.job_id,
             "status": job.status,

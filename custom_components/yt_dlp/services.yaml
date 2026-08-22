@@ -16,7 +16,7 @@ download:
       collapsed: false
       fields:
         video_quality:
-          default: "1080"
+          default: best
           selector:
             select:
               options:
@@ -49,7 +49,7 @@ download:
                 - flac
                 - wav
         audio_quality:
-          default: "192"
+          default: best
           selector:
             select:
               options:
@@ -75,7 +75,7 @@ download_video:
       selector:
         text:
     video_quality:
-      default: "1080"
+      default: best
       selector:
         select:
           options:
@@ -120,7 +120,7 @@ download_audio:
             - flac
             - wav
     audio_quality:
-      default: "192"
+      default: best
       selector:
         select:
           options:

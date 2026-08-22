@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
-VERSION = "0.4.8"
+VERSION = "0.4.9"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 
@@ -41,10 +41,10 @@ AUDIO_FORMATS = ("mp3", "m4a", "opus", "flac", "wav")
 AUDIO_QUALITIES = ("best", "320", "256", "192", "128", "96")
 
 DEFAULT_MEDIA_TYPE = MEDIA_TYPE_VIDEO
-DEFAULT_VIDEO_QUALITY = "1080"
+DEFAULT_VIDEO_QUALITY = "best"
 DEFAULT_VIDEO_FORMAT = "mp4"
 DEFAULT_AUDIO_FORMAT = "mp3"
-DEFAULT_AUDIO_QUALITY = "192"
+DEFAULT_AUDIO_QUALITY = "best"
 DEFAULT_SEARCH_LIMIT = 10
 CONF_MEDIA_LIBRARY_PATH = "media_library_path"
 MAX_SEARCH_LIMIT = 50
