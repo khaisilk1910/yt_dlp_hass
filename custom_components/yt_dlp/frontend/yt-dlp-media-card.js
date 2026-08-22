@@ -793,7 +793,7 @@ class YtDlpMediaCard extends HTMLElement {
               ${this._icon("download-circle-outline")}<span>Download</span>${this._isDownloadActive() ? `<i class="tab-pulse"></i>` : ""}
             </button>
             <button data-view="favorites" class="${this._view === "favorites" ? "active" : ""}">
-              ${this._icon("heart-outline")}<span>Yêu thích</span>
+              ${this._icon("heart-outline")}<span>Favourites</span>
             </button>
           </nav>
 
