@@ -402,6 +402,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 blocking=True,
                 context=call.context,
             )
+            playback.async_track_remote_playback(
+                entity_id, call.data[ATTR_URL], info, media_source_id
+            )
         except HomeAssistantError:
             raise
         except Exception as err:
@@ -440,6 +443,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 blocking=True,
                 context=call.context,
             )
+            for entity_id in entity_ids:
+                playback.async_track_remote_playback(
+                    entity_id, call.data[ATTR_URL], info, media_source_id
+                )
         except HomeAssistantError:
             raise
         except Exception as err:
@@ -593,6 +600,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_MEDIA_LIBRARY_PATH, download_path)
     )
     manager.playback_manager = PlaybackManager(hass, entry, library_path)
+    manager.playback_manager.async_start_resume_monitoring()
     manager.favorites_store = FavoritesStore(hass)
     entry.runtime_data = manager
     manager.async_publish_state()
@@ -619,6 +627,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the manager without unregistering globally available actions."""
     manager = entry.runtime_data
     if isinstance(manager, YoutubeDlpManager):
+        playback = getattr(manager, "playback_manager", None)
+        if isinstance(playback, PlaybackManager):
+            playback.async_stop_resume_monitoring()
         await manager.async_shutdown()
 
     hass.states.async_remove(STATE_DOWNLOADER)

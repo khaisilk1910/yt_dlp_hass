@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 import mimetypes
 import re
@@ -22,7 +23,8 @@ from urllib.parse import quote
 from aiohttp import ClientError, ClientTimeout
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_CALL_SERVICE, EVENT_STATE_CHANGED
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.importlib import async_import_module
 
@@ -65,6 +67,17 @@ _MAX_AUDIO_QUALITY_ROUTES = 32
 _MAX_MUXED_QUALITY_ROUTES = 16
 _MAX_PLAYER_RELOAD_RETRIES = 3
 _PLAYER_RELOAD_RETRY_DELAY_SECONDS = 0.6
+
+# Announcement/TTS resume is handled in the integration backend, not only by
+# the Lovelace card.  This keeps resume working when the dashboard is closed,
+# the browser is asleep, or Cast temporarily reports incomplete media metadata.
+_ANNOUNCEMENT_RESUME_IDLE_DELAY_SECONDS = 1.5
+_ANNOUNCEMENT_MIN_RESUME_AGE_SECONDS = 2.5
+_ANNOUNCEMENT_TRACKING_TTL_SECONDS = 10 * 60
+_ANNOUNCEMENT_RESUME_ATTEMPTS = 3
+_ANNOUNCEMENT_SEEK_ATTEMPTS = 6
+_ANNOUNCEMENT_PLAYBACK_START_TIMEOUT_SECONDS = 12.0
+
 
 # YouTube currently has an intermittent player-response failure that surfaces as
 # "The page needs to be reloaded" before format selection even starts.  Start
@@ -134,6 +147,26 @@ class StreamSession:
     last_access: float
 
 
+@dataclass(slots=True)
+class PlaybackResumeSession:
+    """Track one yt_dlp playback so HA announcements can be restored."""
+
+    entity_id: str
+    source_url: str
+    title: str
+    duration: float | None
+    media_source_id: str
+    stream_token: str
+    position: float = 0.0
+    announcement_active: bool = False
+    announcement_started_at: float = 0.0
+    saw_foreign_media: bool = False
+    saw_idle: bool = False
+    restoring: bool = False
+    generation: int = 0
+    resume_task: asyncio.Task[None] | None = None
+
+
 class PlaybackManager:
     """Resolve remote audio, relay streams, and scan the local music library."""
 
@@ -152,8 +185,407 @@ class PlaybackManager:
         self._library_cache_at = 0.0
         self._library_metadata_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
         self._stream_sessions: dict[str, StreamSession] = {}
+        self._resume_sessions: dict[str, PlaybackResumeSession] = {}
+        self._resume_unsubs: list[CALLBACK_TYPE] = []
         self._javascript_runtime: tuple[str, str] | None | object = _JS_RUNTIME_UNSET
         self._javascript_runtime_lock = threading.Lock()
+
+    @callback
+    def async_start_resume_monitoring(self) -> None:
+        """Listen for HA announcement calls and media-player state changes."""
+        if self._resume_unsubs:
+            return
+        self._resume_unsubs = [
+            self.hass.bus.async_listen(EVENT_CALL_SERVICE, self._handle_call_service_event),
+            self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._handle_state_changed_event),
+        ]
+
+    @callback
+    def async_stop_resume_monitoring(self) -> None:
+        """Remove announcement listeners and cancel pending resume work."""
+        for unsub in self._resume_unsubs:
+            unsub()
+        self._resume_unsubs.clear()
+        for session in self._resume_sessions.values():
+            self._cancel_resume_task(session)
+        self._resume_sessions.clear()
+
+    @callback
+    def async_track_remote_playback(
+        self,
+        entity_id: str,
+        source_url: str,
+        info: StreamInfo,
+        media_source_id: str,
+    ) -> None:
+        """Remember a remote playback started by this integration."""
+        previous = self._resume_sessions.pop(entity_id, None)
+        if previous is not None:
+            self._cancel_resume_task(previous)
+        stream_token = media_source_id.rsplit("/", 1)[-1]
+        session = PlaybackResumeSession(
+            entity_id=entity_id,
+            source_url=source_url,
+            title=info.title,
+            duration=float(info.duration) if isinstance(info.duration, (int, float)) else None,
+            media_source_id=media_source_id,
+            stream_token=stream_token,
+        )
+        state = self.hass.states.get(entity_id)
+        if state is not None and self._state_matches_tracked_media(state, session):
+            position, duration = _state_media_position(state, session.duration)
+            session.position = position
+            if duration is not None:
+                session.duration = duration
+        self._resume_sessions[entity_id] = session
+        _LOGGER.debug("Tracking yt_dlp playback for announcement resume on %s", entity_id)
+
+    @callback
+    def _handle_call_service_event(self, event: Event) -> None:
+        """Observe TTS/announce calls before they replace the current stream."""
+        data = event.data
+        domain = str(data.get("domain") or "")
+        service = str(data.get("service") or "")
+        service_data = data.get("service_data")
+        if not isinstance(service_data, dict):
+            service_data = {}
+
+        if domain == "tts":
+            targets = _service_entity_ids(service_data.get("media_player_entity_id"))
+            if not targets:
+                targets = _service_entity_ids(service_data.get("entity_id"))
+            for entity_id in targets:
+                self._mark_announcement(entity_id, f"tts.{service}")
+            return
+
+        if domain != "media_player":
+            return
+
+        targets = _service_entity_ids(service_data.get("entity_id"))
+        if not targets:
+            return
+
+        if service == "play_media" and bool(service_data.get("announce")):
+            for entity_id in targets:
+                self._mark_announcement(entity_id, "media_player.play_media announce")
+            return
+
+        # A deliberate replacement/stop from the user must not be resurrected
+        # later as if it were an announcement.
+        if service in {"media_stop", "turn_off"} or (
+            service == "play_media" and not bool(service_data.get("announce"))
+        ):
+            for entity_id in targets:
+                session = self._resume_sessions.get(entity_id)
+                if session is None or session.restoring:
+                    continue
+                self._cancel_resume_task(session)
+                self._resume_sessions.pop(entity_id, None)
+
+    @callback
+    def _mark_announcement(self, entity_id: str, reason: str) -> None:
+        session = self._resume_sessions.get(entity_id)
+        if session is None or session.restoring:
+            return
+
+        # tts.speak commonly causes a nested play_media(announce=true) call.
+        # Preserve the first snapshot so a second event cannot overwrite the
+        # music position with the TTS clip's position.
+        if session.announcement_active:
+            return
+
+        state = self.hass.states.get(entity_id)
+        if (
+            state is None
+            or state.state not in {"playing", "buffering"}
+            or not self._state_matches_tracked_media(state, session)
+        ):
+            return
+        position, duration = _state_media_position(state, session.duration)
+        session.position = position
+        if duration is not None:
+            session.duration = duration
+
+        if (
+            session.duration is not None
+            and session.duration > 0
+            and session.position >= max(0.0, session.duration - 1.5)
+        ):
+            return
+
+        self._cancel_resume_task(session)
+        session.announcement_active = True
+        session.announcement_started_at = time.monotonic()
+        session.saw_foreign_media = False
+        session.saw_idle = False
+        session.generation += 1
+        _LOGGER.info(
+            "Captured yt_dlp playback before %s on %s at %.2fs",
+            reason,
+            entity_id,
+            session.position,
+        )
+
+    @callback
+    def _handle_state_changed_event(self, event: Event) -> None:
+        data = event.data
+        entity_id = data.get("entity_id")
+        if not isinstance(entity_id, str):
+            return
+        session = self._resume_sessions.get(entity_id)
+        if session is None:
+            return
+
+        new_state = data.get("new_state")
+        old_state = data.get("old_state")
+        if new_state is not None and not isinstance(new_state, State):
+            return
+        if old_state is not None and not isinstance(old_state, State):
+            old_state = None
+
+        if session.restoring:
+            return
+
+        if not session.announcement_active:
+            if new_state is not None and self._state_matches_tracked_media(new_state, session):
+                position, duration = _state_media_position(new_state, session.duration)
+                session.position = position
+                if duration is not None:
+                    session.duration = duration
+            if (
+                old_state is not None
+                and new_state is not None
+                and self._state_matches_tracked_media(old_state, session)
+                and new_state.state in {"idle", "off", "standby"}
+            ):
+                position, duration = _state_media_position(old_state, session.duration)
+                if duration is not None and position >= max(0.0, duration - 1.5):
+                    self._resume_sessions.pop(entity_id, None)
+            return
+
+        if time.monotonic() - session.announcement_started_at > _ANNOUNCEMENT_TRACKING_TTL_SECONDS:
+            _LOGGER.warning("Announcement resume tracking expired for %s", entity_id)
+            session.announcement_active = False
+            self._cancel_resume_task(session)
+            return
+
+        if new_state is None:
+            return
+
+        if new_state.state in {"idle", "off", "standby"}:
+            session.saw_idle = True
+            self._schedule_announcement_resume(session)
+            return
+
+        if new_state.state in {"playing", "buffering", "paused"}:
+            if self._state_matches_tracked_media(new_state, session):
+                # Only accept automatic restoration after HA/Cast actually
+                # exposed different announcement media. Some Cast updates keep
+                # stale music attributes during TTS; treating those as restored
+                # would clear the resume state too early.
+                if session.saw_foreign_media:
+                    self._cancel_resume_task(session)
+                    self.hass.async_create_task(
+                        self._async_seek_auto_restored(session, session.generation),
+                        name=f"yt_dlp_auto_restore_{entity_id}",
+                    )
+                return
+
+            session.saw_foreign_media = True
+            self._cancel_resume_task(session)
+
+    @callback
+    def _schedule_announcement_resume(self, session: PlaybackResumeSession) -> None:
+        self._cancel_resume_task(session)
+        generation = session.generation
+        elapsed = time.monotonic() - session.announcement_started_at
+        delay = max(
+            _ANNOUNCEMENT_RESUME_IDLE_DELAY_SECONDS,
+            _ANNOUNCEMENT_MIN_RESUME_AGE_SECONDS - elapsed,
+        )
+        session.resume_task = self.hass.async_create_task(
+            self._async_resume_after_announcement(session, generation, delay),
+            name=f"yt_dlp_resume_{session.entity_id}",
+        )
+
+    @callback
+    def _cancel_resume_task(self, session: PlaybackResumeSession) -> None:
+        task = session.resume_task
+        if task is not None and not task.done():
+            task.cancel()
+        session.resume_task = None
+
+    async def _async_resume_after_announcement(
+        self,
+        session: PlaybackResumeSession,
+        generation: int,
+        delay: float,
+    ) -> None:
+        try:
+            await asyncio.sleep(delay)
+            if not self._resume_session_is_current(session, generation):
+                return
+            state = self.hass.states.get(session.entity_id)
+            if state is None or state.state not in {"idle", "off", "standby"}:
+                return
+
+            session.restoring = True
+            last_error: Exception | None = None
+            for attempt in range(1, _ANNOUNCEMENT_RESUME_ATTEMPTS + 1):
+                if not self._resume_session_is_current(session, generation):
+                    return
+                try:
+                    info, media_source_id = await self.async_create_stream(session.source_url)
+                    metadata: dict[str, object] = {"title": info.title}
+                    if info.artist:
+                        metadata["artist"] = info.artist
+                    if info.thumbnail:
+                        metadata["images"] = [{"url": info.thumbnail}]
+
+                    await self.hass.services.async_call(
+                        "media_player",
+                        "play_media",
+                        service_data={
+                            "media_content_id": media_source_id,
+                            "media_content_type": info.mime_type,
+                            "extra": {"metadata": metadata},
+                        },
+                        target={"entity_id": session.entity_id},
+                        blocking=True,
+                    )
+
+                    session.title = info.title
+                    session.duration = (
+                        float(info.duration)
+                        if isinstance(info.duration, (int, float))
+                        else session.duration
+                    )
+                    session.media_source_id = media_source_id
+                    session.stream_token = media_source_id.rsplit("/", 1)[-1]
+                    await self._async_seek_resume_position(session)
+
+                    session.announcement_active = False
+                    session.saw_foreign_media = False
+                    session.saw_idle = False
+                    _LOGGER.info(
+                        "Resumed yt_dlp playback after announcement on %s at %.2fs",
+                        session.entity_id,
+                        session.position,
+                    )
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:  # noqa: BLE001 - service/yt-dlp errors vary
+                    last_error = err
+                    _LOGGER.warning(
+                        "Unable to resume yt_dlp playback after announcement on %s "
+                        "(attempt %s/%s): %s",
+                        session.entity_id,
+                        attempt,
+                        _ANNOUNCEMENT_RESUME_ATTEMPTS,
+                        err,
+                    )
+                    if attempt < _ANNOUNCEMENT_RESUME_ATTEMPTS:
+                        await asyncio.sleep(0.8 * attempt)
+
+            if last_error is not None:
+                _LOGGER.error(
+                    "Failed to resume yt_dlp playback after announcement on %s: %s",
+                    session.entity_id,
+                    last_error,
+                )
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._resume_sessions.get(session.entity_id) is session:
+                session.restoring = False
+                session.resume_task = None
+
+    async def _async_seek_auto_restored(
+        self, session: PlaybackResumeSession, generation: int
+    ) -> None:
+        if not self._resume_session_is_current(session, generation):
+            return
+        session.restoring = True
+        try:
+            await self._async_seek_resume_position(session)
+            session.announcement_active = False
+            session.saw_foreign_media = False
+            session.saw_idle = False
+            _LOGGER.info(
+                "Re-seeked Cast auto-restored yt_dlp playback on %s to %.2fs",
+                session.entity_id,
+                session.position,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Cast restored yt_dlp media but seek failed on %s: %s",
+                session.entity_id,
+                err,
+            )
+        finally:
+            if self._resume_sessions.get(session.entity_id) is session:
+                session.restoring = False
+
+    async def _async_seek_resume_position(self, session: PlaybackResumeSession) -> None:
+        deadline = time.monotonic() + _ANNOUNCEMENT_PLAYBACK_START_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            state = self.hass.states.get(session.entity_id)
+            if state is not None and state.state in {"playing", "buffering"}:
+                break
+            await asyncio.sleep(0.2)
+        else:
+            raise RuntimeError("speaker did not start restored playback")
+
+        last_error: Exception | None = None
+        for attempt in range(1, _ANNOUNCEMENT_SEEK_ATTEMPTS + 1):
+            try:
+                await self.hass.services.async_call(
+                    "media_player",
+                    "media_seek",
+                    service_data={"seek_position": max(0.0, session.position)},
+                    target={"entity_id": session.entity_id},
+                    blocking=True,
+                )
+                return
+            except Exception as err:  # noqa: BLE001
+                last_error = err
+                await asyncio.sleep(0.25 * attempt)
+        raise last_error or RuntimeError("unable to seek restored playback")
+
+    @callback
+    def _state_matches_tracked_media(
+        self, state: State, session: PlaybackResumeSession
+    ) -> bool:
+        attrs = state.attributes
+        content_id = str(attrs.get("media_content_id") or "")
+        if session.stream_token and session.stream_token in content_id:
+            return True
+        if content_id == session.media_source_id:
+            return True
+
+        title = str(attrs.get("media_title") or "").strip()
+        if not title or title != session.title:
+            return False
+        raw_duration = attrs.get("media_duration")
+        if (
+            session.duration is not None
+            and isinstance(raw_duration, (int, float))
+            and raw_duration > 0
+            and abs(float(raw_duration) - session.duration) > 3.0
+        ):
+            return False
+        return True
+
+    @callback
+    def _resume_session_is_current(
+        self, session: PlaybackResumeSession, generation: int
+    ) -> bool:
+        return (
+            self._resume_sessions.get(session.entity_id) is session
+            and session.announcement_active
+            and session.generation == generation
+        )
 
     def _js_runtime_options(self) -> dict[str, dict[str, str]] | None:
         """Lazily detect a JS runtime inside an executor worker."""
@@ -697,6 +1129,53 @@ class PlaybackManager:
             return None
         return candidate
 
+
+
+def _service_entity_ids(value: object) -> tuple[str, ...]:
+    """Normalize service entity-id fields without depending on target helpers."""
+    if isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, (list, tuple, set)):
+        values = tuple(item for item in value if isinstance(item, str))
+    else:
+        return ()
+    return tuple(
+        dict.fromkeys(
+            entity_id
+            for entity_id in values
+            if entity_id.startswith("media_player.")
+        )
+    )
+
+
+def _state_media_position(
+    state: State, fallback_duration: float | None = None
+) -> tuple[float, float | None]:
+    """Return an estimated current media position using HA's timestamp."""
+    attrs = state.attributes
+    try:
+        position = max(0.0, float(attrs.get("media_position") or 0.0))
+    except (TypeError, ValueError):
+        position = 0.0
+
+    raw_duration = attrs.get("media_duration")
+    if isinstance(raw_duration, (int, float)) and raw_duration > 0:
+        duration: float | None = float(raw_duration)
+    else:
+        duration = fallback_duration
+
+    if state.state == "playing":
+        updated_at = attrs.get("media_position_updated_at")
+        if updated_at:
+            try:
+                stamp = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+                position += max(0.0, time.time() - stamp.timestamp())
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+    if duration is not None and duration > 0:
+        position = min(position, duration)
+    return position, duration
 
 
 def _first_tag_value(tags: Any, key: str) -> str | None:
