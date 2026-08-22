@@ -34,6 +34,11 @@ class YtDlpMediaCard extends HTMLElement {
     this._queueAdvancing = false;
     this._queueStopRequested = false;
     this._queueStartedAt = 0;
+    this._activePlayback = null;
+    this._interruptedPlayback = null;
+    this._interruptionCandidate = null;
+    this._interruptionCandidateTimer = null;
+    this._resumeInFlight = false;
     this._speakerSelectionRestored = false;
     this._busy = false;
     this._tickTimer = null;
@@ -192,8 +197,10 @@ class YtDlpMediaCard extends HTMLElement {
   disconnectedCallback() {
     if (this._tickTimer) window.clearInterval(this._tickTimer);
     if (this._speakerCloseTimer) window.clearTimeout(this._speakerCloseTimer);
+    if (this._interruptionCandidateTimer) window.clearTimeout(this._interruptionCandidateTimer);
     this._tickTimer = null;
     this._speakerCloseTimer = null;
+    this._interruptionCandidateTimer = null;
   }
 
   getCardSize() {
@@ -248,6 +255,8 @@ class YtDlpMediaCard extends HTMLElement {
       this._currentLibraryIndex = -1;
       this._currentFavoriteIndex = -1;
       this._queue = null;
+      this._clearPlaybackInterruption();
+      this._activePlayback = null;
     }
   }
 
@@ -1051,6 +1060,7 @@ class YtDlpMediaCard extends HTMLElement {
             media_player: this._selectedPlayer,
           });
       this._nowPlaying = response || { title: "YouTube audio", url };
+      this._activePlayback = { kind: "url", url };
       this._currentLibraryIndex = -1;
       this._currentFavoriteIndex = -1;
       const targetText = selectedPlayers.length > 1 ? ` trên ${selectedPlayers.length} loa` : "";
@@ -1327,13 +1337,178 @@ class YtDlpMediaCard extends HTMLElement {
     if (this._queue === queue && this._state()?.state === "playing") queue.started = true;
   }
 
+  _mediaIdentity(state) {
+    const attrs = state?.attributes || {};
+    return [
+      attrs.media_content_id || "",
+      attrs.media_title || "",
+      attrs.media_artist || "",
+      attrs.media_album_name || "",
+    ].join("\u241f");
+  }
+
+  _clearInterruptionCandidate() {
+    if (this._interruptionCandidateTimer) window.clearTimeout(this._interruptionCandidateTimer);
+    this._interruptionCandidateTimer = null;
+    this._interruptionCandidate = null;
+  }
+
+  _clearPlaybackInterruption() {
+    this._clearInterruptionCandidate();
+    this._interruptedPlayback = null;
+    this._resumeInFlight = false;
+  }
+
+  _captureInterruptedPlayback(state) {
+    if (!this._activePlayback) return null;
+    const { position, duration } = this._position(state);
+    return {
+      source: { ...this._activePlayback },
+      position,
+      duration,
+      identity: this._mediaIdentity(state),
+    };
+  }
+
+  _beginPlaybackInterruption(snapshot) {
+    if (!snapshot || this._interruptedPlayback || this._resumeInFlight) return;
+    this._clearInterruptionCandidate();
+    this._interruptedPlayback = snapshot;
+    if (this._queue) this._queue.started = false;
+  }
+
+  _deferPossibleInterruption(snapshot, delay = 2500) {
+    this._clearInterruptionCandidate();
+    this._interruptionCandidate = snapshot;
+    this._interruptionCandidateTimer = window.setTimeout(() => {
+      const candidate = this._interruptionCandidate;
+      this._clearInterruptionCandidate();
+      if (!candidate || this._interruptedPlayback || this._resumeInFlight) return;
+      if (["idle", "off", "standby"].includes(this._state()?.state)) {
+        this._activePlayback = null;
+        if (this._queue && !this._queueStopRequested && !this._queueAdvancing) {
+          this._queue.started = false;
+          this._advanceQueueAfterEnd();
+        }
+      }
+    }, delay);
+  }
+
+  async _waitForPlaybackStart() {
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      if (["playing", "buffering"].includes(this._state()?.state)) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+    return false;
+  }
+
+  async _resumeInterruptedPlayback() {
+    const interrupted = this._interruptedPlayback;
+    if (!interrupted || this._resumeInFlight || this._queueStopRequested) return;
+    this._resumeInFlight = true;
+    this._interruptedPlayback = null;
+    try {
+      const source = interrupted.source;
+      if (source.kind === "online") {
+        const index = this._favorites.findIndex((item) => item.url === source.url);
+        if (index < 0) return;
+        await this._playFavorite(index, true);
+      } else if (source.kind === "offline") {
+        const index = this._library.findIndex((item) => item.id === source.id);
+        if (index < 0) return;
+        await this._playLibrary(index, true);
+      } else if (source.kind === "url") {
+        const selectedPlayers = this._targetPlayers();
+        if (!source.url || !selectedPlayers.length) return;
+        this._busy = true;
+        this._render();
+        try {
+          const response = selectedPlayers.length > 1
+            ? await this._callServiceResponse("yt_dlp", "play_multi", { url: source.url, media_players: selectedPlayers })
+            : await this._callServiceResponse("yt_dlp", "play", { url: source.url, media_player: this._selectedPlayer });
+          this._nowPlaying = response || this._nowPlaying || { title: "YouTube audio", url: source.url };
+          this._activePlayback = { kind: "url", url: source.url };
+        } finally {
+          this._busy = false;
+          this._render();
+        }
+      }
+
+      if (await this._waitForPlaybackStart()) {
+        await this._callMediaService("media_seek", { seek_position: Math.max(0, interrupted.position) });
+      }
+      if (this._queue) {
+        this._queue.started = true;
+        this._queueStartedAt = Date.now();
+      }
+    } catch (error) {
+      this._notify(`Không thể tiếp tục nhạc sau thông báo: ${error?.message || error}`);
+    } finally {
+      this._resumeInFlight = false;
+    }
+  }
+
   _handlePlayerTransition(previousState, currentState) {
-    const queue = this._queue;
-    if (!queue || this._queueStopRequested || this._queueAdvancing) return;
+    if (this._queueStopRequested || this._queueAdvancing || this._resumeInFlight) return;
     const current = currentState?.state;
     const previous = previousState?.state;
-    if (["playing", "buffering"].includes(current)) queue.started = true;
-    if (queue.started && ["playing", "paused", "buffering"].includes(previous) && ["idle", "off", "standby"].includes(current)) {
+    const queue = this._queue;
+
+    if (this._interruptedPlayback) {
+      if (current === "playing" && this._mediaIdentity(currentState) === this._interruptedPlayback.identity) {
+        this._interruptedPlayback = null;
+        if (queue) queue.started = true;
+        return;
+      }
+      if (["idle", "off", "standby"].includes(current)) {
+        queueMicrotask(() => this._resumeInterruptedPlayback());
+      }
+      return;
+    }
+
+    if (this._interruptionCandidate) {
+      if (current === "playing") {
+        const candidate = this._interruptionCandidate;
+        if (this._mediaIdentity(currentState) !== candidate.identity) {
+          this._beginPlaybackInterruption(candidate);
+          return;
+        }
+        this._clearInterruptionCandidate();
+        if (queue) queue.started = true;
+      }
+      return;
+    }
+
+    if (this._activePlayback && previous === "playing" && current === "playing" && !this._busy) {
+      const previousIdentity = this._mediaIdentity(previousState);
+      if (previousIdentity && this._mediaIdentity(currentState) !== previousIdentity) {
+        this._beginPlaybackInterruption(this._captureInterruptedPlayback(previousState));
+        return;
+      }
+    }
+
+    if (this._activePlayback && previous === "playing" && ["paused", "buffering"].includes(current) && !this._busy) {
+      const previousIdentity = this._mediaIdentity(previousState);
+      if (current === "paused" || this._mediaIdentity(currentState) !== previousIdentity) {
+        if (queue) queue.started = false;
+        this._deferPossibleInterruption(this._captureInterruptedPlayback(previousState), 5000);
+        return;
+      }
+    }
+
+    if (["playing", "buffering"].includes(current) && queue) queue.started = true;
+
+    if (this._activePlayback && previous === "playing" && ["idle", "off", "standby"].includes(current)) {
+      const snapshot = this._captureInterruptedPlayback(previousState);
+      if (snapshot?.duration > 0 && snapshot.position < snapshot.duration - 1.5) {
+        if (queue) queue.started = false;
+        this._deferPossibleInterruption(snapshot);
+        return;
+      }
+      this._activePlayback = null;
+    }
+
+    if (queue?.started && ["playing", "paused", "buffering"].includes(previous) && ["idle", "off", "standby"].includes(current)) {
       queue.started = false;
       queueMicrotask(() => this._advanceQueueAfterEnd());
     }
@@ -1365,6 +1540,8 @@ class YtDlpMediaCard extends HTMLElement {
     this._queueStopRequested = true;
     this._queue = null;
     this._queueAdvancing = false;
+    this._clearPlaybackInterruption();
+    this._activePlayback = null;
     try {
       await this._callMediaService("media_stop");
     } finally {
@@ -1394,6 +1571,7 @@ class YtDlpMediaCard extends HTMLElement {
         ? await this._callServiceResponse("yt_dlp", "play_multi", { url: item.url, media_players: selectedPlayers })
         : await this._callServiceResponse("yt_dlp", "play", { url: item.url, media_player: this._selectedPlayer });
       if (response) this._nowPlaying = { ...item, ...response };
+      this._activePlayback = { kind: "online", url: item.url };
     } catch (error) {
       this._queue = null;
       this._notify(`Không thể phát bài Online: ${error?.message || error}`);
@@ -1452,6 +1630,7 @@ class YtDlpMediaCard extends HTMLElement {
         },
         { entity_id: selectedPlayers.length === 1 ? selectedPlayers[0] : selectedPlayers }
       );
+      this._activePlayback = { kind: "offline", id: item.id };
     } catch (error) {
       this._queue = null;
       this._notify(`Không thể phát file: ${error?.message || error}`);
