@@ -1,4 +1,4 @@
-"""Signed HTTP endpoints for YouTube-DLP local files and remote stream relay."""
+"""HTTP endpoints for YouTube-DLP local files and remote stream relay."""
 
 from __future__ import annotations
 
@@ -77,17 +77,24 @@ class YoutubeDlpStreamView(HomeAssistantView):
     """Relay one yt-dlp upstream stream through Home Assistant.
 
     Cast and many other renderers cannot send yt-dlp's required request headers
-    to a short-lived googlevideo URL. A signed HA URL keeps the renderer on the
-    Home Assistant endpoint while HA performs the upstream request with the
+    to a short-lived googlevideo URL. A short-lived capability URL keeps the
+    renderer on the Home Assistant endpoint while HA performs the upstream request with the
     headers/cookies produced by yt-dlp.
     """
 
-    url = f"{STREAM_URL_PREFIX}/{{token}}"
+    # The stream token is a high-entropy, short-lived capability. Keeping this
+    # endpoint free of Home Assistant's long authSig query is intentional: a
+    # number of Cast receivers are unreliable with long signed media URLs.
+    # The token remains unguessable and expires with the in-memory session.
+    url = f"{STREAM_URL_PREFIX}/{{token_and_ext}}"
     name = "api:yt_dlp:stream"
-    requires_auth = True
+    requires_auth = False
 
-    async def head(self, request: web.Request, token: str) -> web.Response:
+    async def head(
+        self, request: web.Request, token_and_ext: str
+    ) -> web.Response:
         """Probe the upstream with a one-byte GET and expose full media length."""
+        token = _stream_token(token_and_ext)
         response = await self._open_upstream(request, token, head_probe=True)
         try:
             headers = _copy_response_headers(response, head_probe=True)
@@ -95,8 +102,11 @@ class YoutubeDlpStreamView(HomeAssistantView):
         finally:
             response.release()
 
-    async def get(self, request: web.Request, token: str) -> web.StreamResponse:
+    async def get(
+        self, request: web.Request, token_and_ext: str
+    ) -> web.StreamResponse:
         """Asynchronously relay a range-capable upstream response."""
+        token = _stream_token(token_and_ext)
         response = await self._open_upstream(request, token, head_probe=False)
         headers = _copy_response_headers(response, head_probe=False)
         outgoing = web.StreamResponse(status=response.status, headers=headers)
@@ -198,6 +208,14 @@ class YoutubeDlpStreamView(HomeAssistantView):
         raise web.HTTPBadGateway(text="Upstream media stream was rejected")
 
 
+def _stream_token(token_and_ext: str) -> str:
+    """Strip the cosmetic media suffix from a capability token."""
+    token = token_and_ext.split(".", 1)[0]
+    if not token or "/" in token:
+        raise web.HTTPNotFound(text="Playback stream has expired")
+    return token
+
+
 def _upstream_headers(
     yt_headers: dict[str, str], request: web.Request, *, head_probe: bool
 ) -> dict[str, str]:
@@ -229,6 +247,8 @@ def _copy_response_headers(
         if name in response.headers
     }
     headers["Cache-Control"] = "no-store"
+    headers["Access-Control-Allow-Origin"] = "*"
+    headers["Cross-Origin-Resource-Policy"] = "cross-origin"
 
     if head_probe:
         content_range = response.headers.get("Content-Range", "")

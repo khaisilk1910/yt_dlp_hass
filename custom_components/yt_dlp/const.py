@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
-VERSION = "0.4.9"
+VERSION = "0.4.10"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 

@@ -483,8 +483,14 @@ def _stream_mime_type(ext: str, acodec: str, vcodec: str = "") -> str:
     if has_video and ext == "webm":
         return "video/webm"
     if ext in ("m4a", "mp4") or acodec.startswith("mp4a"):
+        if acodec.startswith("mp4a."):
+            return f'audio/mp4; codecs="{acodec}"'
         return "audio/mp4"
     if ext in ("webm", "weba"):
+        if "opus" in acodec:
+            return 'audio/webm; codecs="opus"'
+        if "vorbis" in acodec:
+            return 'audio/webm; codecs="vorbis"'
         return "audio/webm"
     if ext in ("ogg", "oga", "opus") or "opus" in acodec:
         return "audio/ogg"
