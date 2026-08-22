@@ -234,9 +234,9 @@ favorites_playback_set:
       selector:
         select:
           options:
-            - off
-            - one
-            - all
+            - "off"
+            - "one"
+            - "all"
 
 favorites_playback_start:
   fields:
@@ -263,9 +263,9 @@ favorites_playback_start:
       selector:
         select:
           options:
-            - off
-            - one
-            - all
+            - "off"
+            - "one"
+            - "all"
     replace_selection:
       default: true
       selector:

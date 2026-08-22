@@ -21,11 +21,11 @@ from homeassistant.components.media_player import (
     SERVICE_PLAY_MEDIA,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.const import EVENT_CALL_SERVICE, EVENT_STATE_CHANGED
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
 from homeassistant.helpers.storage import Store
 
-from .const import STATE_FAVORITES_PLAYBACK
+from .const import DOMAIN, SERVICE_PLAY, SERVICE_PLAY_MULTI, STATE_FAVORITES_PLAYBACK
 from .favorites import FavoritesStore
 from .playback import PlaybackManager
 
@@ -124,8 +124,10 @@ class FavoritesPlaybackController:
         self._revision = 0
         self._generation = 0
         self._unsub_state: CALLBACK_TYPE | None = None
+        self._unsub_service: CALLBACK_TYPE | None = None
         self._restore_task: asyncio.Task[None] | None = None
         self._advance_task: asyncio.Task[None] | None = None
+        self._detach_task: asyncio.Task[None] | None = None
 
         self._repeat_mode = "off"
         self._online_selected: list[str] = []
@@ -146,6 +148,10 @@ class FavoritesPlaybackController:
             self._unsub_state = self.hass.bus.async_listen(
                 EVENT_STATE_CHANGED, self._handle_state_changed_event
             )
+        if self._unsub_service is None:
+            self._unsub_service = self.hass.bus.async_listen(
+                EVENT_CALL_SERVICE, self._handle_call_service_event
+            )
         await self._async_ensure_loaded()
         self._publish_state()
         if self._active and self._queue and self._players and not self._stopping:
@@ -161,11 +167,15 @@ class FavoritesPlaybackController:
         if self._unsub_state is not None:
             self._unsub_state()
             self._unsub_state = None
-        for task in (self._restore_task, self._advance_task):
+        if self._unsub_service is not None:
+            self._unsub_service()
+            self._unsub_service = None
+        for task in (self._restore_task, self._advance_task, self._detach_task):
             if task is not None and not task.done():
                 task.cancel()
         self._restore_task = None
         self._advance_task = None
+        self._detach_task = None
         self.hass.states.async_remove(STATE_FAVORITES_PLAYBACK)
 
     async def _async_ensure_loaded(self) -> None:
@@ -635,6 +645,42 @@ class FavoritesPlaybackController:
                 self._current = current
                 self._started_at = time.time()
                 await self._async_save_locked()
+
+    @callback
+    def _handle_call_service_event(self, event: Event) -> None:
+        """Detach Favorites when the protected direct-play service is invoked.
+
+        This listener is deliberately outside play_services.py.  Direct speaker
+        playback remains unaware of Favorites, while Favorites can still hide
+        its dedicated player and stop queue advancement when the user switches
+        to the Media Player tab or calls yt_dlp.play/play_multi elsewhere.
+        Checked selections are preserved; only Favorites Stop clears them.
+        """
+        if self._stopping or not self._active:
+            return
+        data = event.data
+        if data.get("domain") != DOMAIN or data.get("service") not in {
+            SERVICE_PLAY,
+            SERVICE_PLAY_MULTI,
+        }:
+            return
+        if self._detach_task is not None and not self._detach_task.done():
+            return
+        self._detach_task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_detach_for_direct_play(),
+            "yt_dlp_favorites_detach_direct_play",
+        )
+
+    async def _async_detach_for_direct_play(self) -> None:
+        try:
+            await self.async_cancel_active(preserve_selection=True)
+        except asyncio.CancelledError:
+            return
+        except Exception as err:  # noqa: BLE001 - storage errors are non-fatal to direct play
+            _LOGGER.warning("Unable to detach Favorites before direct playback: %s", err)
+        finally:
+            self._detach_task = None
 
     @callback
     def _handle_state_changed_event(self, event: Event) -> None:

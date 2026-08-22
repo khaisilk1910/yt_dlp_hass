@@ -694,8 +694,24 @@ class PlaybackManager:
                 return 0.0
 
         def _rank(candidate: dict[str, Any]) -> tuple[float, ...]:
-            # Audio quality is the primary goal. For muxed fallbacks, video
-            # resolution is only a later tie-breaker.
+            # Prefer AAC in an MP4/M4A container before WebM/Opus.  Current
+            # Google Cast receivers are substantially more reliable with the
+            # audio/mp4 path, while AAC is also broadly accepted by non-Cast
+            # media_player integrations.  This preference is playback-only and
+            # does not change any yt-dlp download format/quality selection.
+            ext = str(candidate.get("ext") or "").lower()
+            acodec = str(candidate.get("acodec") or "").lower()
+            if ext in {"m4a", "mp4"} and (
+                acodec.startswith("mp4a") or "aac" in acodec
+            ):
+                compatibility = 3.0
+            elif ext == "mp3" or acodec in {"mp3", "mp3float"}:
+                compatibility = 2.0
+            elif ext in {"ogg", "oga"}:
+                compatibility = 1.5
+            else:
+                compatibility = 1.0
+
             abr = _number(candidate.get("abr"))
             tbr = _number(candidate.get("tbr"))
             asr = _number(candidate.get("asr"))
@@ -704,7 +720,7 @@ class PlaybackManager:
                 candidate.get("filesize_approx")
             )
             height = _number(candidate.get("height"))
-            return (abr or tbr, asr, channels, height, size)
+            return (compatibility, abr or tbr, asr, channels, height, size)
 
         with youtube_dl_cls(opts) as ydl:
             info = ydl.extract_info(url, download=False, process=False)
