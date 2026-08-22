@@ -44,27 +44,11 @@ def ensure_writable_directory(path: str) -> str:
 def detect_javascript_runtime() -> tuple[str, str] | None:
     """Detect one external JavaScript runtime supported by yt-dlp.
 
-    Path lookups and the bundled Deno lookup may touch the file system, so this
-    helper is intentionally called lazily from yt-dlp executor workers rather
-    than during Home Assistant startup.
+    Path lookups may touch the file system, so this helper is intentionally
+    called lazily from yt-dlp executor workers rather than during HA startup.
     """
-    # Deno is yt-dlp's recommended runtime. Prefer a system Deno first, then the
-    # official PyPI redistribution declared by this integration. This avoids
-    # accidentally selecting an older system Node before the known-good bundled
-    # Deno binary.
-    if path := shutil.which("deno"):
-        return "deno", path
-
-    try:
-        import deno  # type: ignore[import-not-found]
-
-        bundled = deno.find_deno_bin()
-    except (ImportError, AttributeError, OSError, RuntimeError):
-        bundled = None
-    if bundled and os.path.isfile(bundled):
-        return "deno", bundled
-
     for runtime, executable in (
+        ("deno", "deno"),
         ("node", "node"),
         ("bun", "bun"),
         ("quickjs", "qjs"),
