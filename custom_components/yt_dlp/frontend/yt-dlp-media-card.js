@@ -30,6 +30,19 @@ class YtDlpMediaCard extends HTMLElement {
     this._currentLibraryIndex = -1;
     this._currentFavoriteIndex = -1;
     this._repeatMode = "off";
+    this._favoritePlaybackLoaded = false;
+    this._favoritePlaybackLoading = false;
+    this._favoritePlaybackActive = false;
+    this._favoritePlaybackKind = null;
+    this._favoritePlaybackQueue = [];
+    this._favoritePlaybackCursor = 0;
+    this._favoritePlaybackCurrent = null;
+    this._favoritePlaybackSelectionBound = false;
+    this._favoritePlaybackRevision = -1;
+    this._favoritePlaybackRetryAt = 0;
+    this._favoriteSettingsDirty = false;
+    this._favoriteSettingsGeneration = 0;
+    this._favoriteSettingsTimer = null;
     this._queue = null;
     this._queueAdvancing = false;
     this._queueStopRequested = false;
@@ -164,6 +177,7 @@ class YtDlpMediaCard extends HTMLElement {
     const previousState = previous?.states?.[previousSelected];
     const previousPlayers = this._playerSignature(previous);
     this._hass = hass;
+    const favoritePlaybackChanged = this._syncFavoritePlaybackFromEntity(hass.states["yt_dlp.favorites_playback"]);
     const players = this._players();
 
     this._selectedPlayers = this._selectedPlayers.filter((entityId) => Boolean(hass.states[entityId]));
@@ -180,13 +194,25 @@ class YtDlpMediaCard extends HTMLElement {
     }
 
     const currentState = hass.states[this._selectedPlayer];
-    this._handlePlayerTransition(previousState, currentState);
+    // Do not compare states from two different speakers when the persisted
+    // Favorites session restores its own target player during this hass update.
+    // Backend-owned Favorites playback also advances its queue server-side.
+    if (!this._favoritePlaybackActive && previousSelected === this._selectedPlayer) {
+      this._handlePlayerTransition(previousState, currentState);
+    }
 
     const playerChanged = previousState !== currentState;
     const selectionChanged = previousSelected !== this._selectedPlayer || previousSelection !== this._selectedPlayers.join("|");
     const playersChanged = previousPlayers !== this._playerSignature(hass);
-    const shouldRender = !previous || selectionChanged || playersChanged || (this._view !== "download" && playerChanged);
+    const shouldRender = !previous || selectionChanged || playersChanged || favoritePlaybackChanged || (this._view !== "download" && playerChanged);
     if (shouldRender) this._render();
+    if (
+      !this._favoritePlaybackLoaded
+      && !this._favoritePlaybackLoading
+      && Date.now() >= this._favoritePlaybackRetryAt
+    ) {
+      queueMicrotask(() => this._loadFavoritePlaybackState());
+    }
   }
 
   connectedCallback() {
@@ -199,9 +225,11 @@ class YtDlpMediaCard extends HTMLElement {
     if (this._tickTimer) window.clearInterval(this._tickTimer);
     if (this._speakerCloseTimer) window.clearTimeout(this._speakerCloseTimer);
     if (this._interruptionCandidateTimer) window.clearTimeout(this._interruptionCandidateTimer);
+    if (this._favoriteSettingsTimer) window.clearTimeout(this._favoriteSettingsTimer);
     this._tickTimer = null;
     this._speakerCloseTimer = null;
     this._interruptionCandidateTimer = null;
+    this._favoriteSettingsTimer = null;
   }
 
   getCardSize() {
@@ -274,6 +302,158 @@ class YtDlpMediaCard extends HTMLElement {
       window.localStorage?.setItem("yt_dlp_media_card_repeat", this._repeatMode);
     } catch (_error) {
       // Optional browser convenience only.
+    }
+  }
+
+  _orderedOnlineSelection() {
+    const known = this._favorites.filter((item) => this._onlineSelected.has(item.url)).map((item) => item.url);
+    const knownSet = new Set(known);
+    return [...known, ...[...this._onlineSelected].filter((url) => !knownSet.has(url))];
+  }
+
+  _orderedOfflineSelection() {
+    const known = this._library.filter((item) => this._offlineSelected.has(item.id)).map((item) => item.id);
+    const knownSet = new Set(known);
+    return [...known, ...[...this._offlineSelected].filter((id) => !knownSet.has(id))];
+  }
+
+  _applyFavoritePlaybackState(data, forceSettings = false) {
+    if (!data || typeof data !== "object") return false;
+    const revision = Number(data.revision);
+    if (Number.isFinite(revision) && this._favoritePlaybackLoaded && revision < this._favoritePlaybackRevision) return false;
+
+    const before = [
+      this._favoritePlaybackActive,
+      this._favoritePlaybackKind || "",
+      this._favoritePlaybackCursor,
+      this._favoritePlaybackQueue.join("\u241f"),
+      this._repeatMode,
+      [...this._onlineSelected].sort().join("\u241f"),
+      [...this._offlineSelected].sort().join("\u241f"),
+      this._favoritePlaybackCurrent?.key || "",
+    ].join("|");
+
+    if (!this._favoriteSettingsDirty || forceSettings) {
+      this._onlineSelected = new Set(Array.isArray(data.online_selected) ? data.online_selected.filter((value) => typeof value === "string") : []);
+      this._offlineSelected = new Set(Array.isArray(data.offline_selected) ? data.offline_selected.filter((value) => typeof value === "string") : []);
+      if (["off", "one", "all"].includes(data.repeat_mode)) this._repeatMode = data.repeat_mode;
+      this._persistRepeatMode();
+    }
+
+    this._favoritePlaybackActive = Boolean(data.active);
+    this._favoritePlaybackKind = ["online", "offline"].includes(data.kind) ? data.kind : null;
+    this._favoritePlaybackQueue = Array.isArray(data.queue) ? data.queue.filter((value) => typeof value === "string") : [];
+    this._favoritePlaybackCursor = Math.max(0, Number(data.cursor) || 0);
+    this._favoritePlaybackCurrent = data.current && typeof data.current === "object" ? { ...data.current } : null;
+    this._favoritePlaybackSelectionBound = Boolean(data.selection_bound);
+    if (Number.isFinite(revision)) this._favoritePlaybackRevision = Math.max(this._favoritePlaybackRevision, revision);
+    this._favoritePlaybackLoaded = true;
+
+    const sessionPlayers = Array.isArray(data.media_players)
+      ? data.media_players.filter((entityId) => typeof entityId === "string" && this._hass?.states?.[entityId])
+      : [];
+    if (this._favoritePlaybackActive && sessionPlayers.length) {
+      this._selectedPlayers = [...new Set(sessionPlayers)];
+      this._selectedPlayer = this._selectedPlayers[0] || this._selectedPlayer;
+      this._speakerSelectionRestored = true;
+      this._persistSpeakerSelection();
+    }
+
+    const currentKey = typeof data.current_key === "string" ? data.current_key : this._favoritePlaybackCurrent?.key;
+    if (this._favoritePlaybackActive) {
+      if (this._favoritePlaybackKind === "online") {
+        this._currentFavoriteIndex = this._favorites.findIndex((item) => item.url === currentKey);
+        this._currentLibraryIndex = -1;
+      } else if (this._favoritePlaybackKind === "offline") {
+        this._currentLibraryIndex = this._library.findIndex((item) => item.id === currentKey);
+        this._currentFavoriteIndex = -1;
+      }
+      if (this._favoritePlaybackCurrent) this._nowPlaying = { ...this._favoritePlaybackCurrent };
+      this._queue = null;
+      this._activePlayback = null;
+      this._clearPlaybackInterruption();
+    } else {
+      this._currentFavoriteIndex = -1;
+      this._currentLibraryIndex = -1;
+    }
+
+    const after = [
+      this._favoritePlaybackActive,
+      this._favoritePlaybackKind || "",
+      this._favoritePlaybackCursor,
+      this._favoritePlaybackQueue.join("\u241f"),
+      this._repeatMode,
+      [...this._onlineSelected].sort().join("\u241f"),
+      [...this._offlineSelected].sort().join("\u241f"),
+      this._favoritePlaybackCurrent?.key || "",
+    ].join("|");
+    return before !== after;
+  }
+
+  _syncFavoritePlaybackFromEntity(state) {
+    if (!state?.attributes) return false;
+    const revision = Number(state.attributes.revision);
+    if (Number.isFinite(revision) && this._favoritePlaybackLoaded && revision === this._favoritePlaybackRevision) return false;
+    return this._applyFavoritePlaybackState(state.attributes, false);
+  }
+
+  async _loadFavoritePlaybackState() {
+    if (!this._hass || this._favoritePlaybackLoading || this._favoritePlaybackLoaded) return;
+    this._favoritePlaybackLoading = true;
+    try {
+      const response = await this._callServiceResponse("yt_dlp", "favorites_playback_get");
+      this._favoritePlaybackRetryAt = 0;
+      const changed = this._applyFavoritePlaybackState(response, false);
+      if (changed) this._render();
+    } catch (_error) {
+      // Avoid hammering the websocket while the integration/config entry is
+      // still loading. The HA state entity can synchronize immediately later.
+      this._favoritePlaybackRetryAt = Date.now() + 5000;
+    } finally {
+      this._favoritePlaybackLoading = false;
+    }
+  }
+
+  _schedulePersistFavoriteSettings() {
+    this._favoriteSettingsDirty = true;
+    const generation = ++this._favoriteSettingsGeneration;
+    this._persistRepeatMode();
+    this._persistFavoriteSettings(generation);
+  }
+
+  async _persistFavoriteSettings(generation) {
+    if (!this._hass) return;
+    try {
+      const response = await this._callServiceResponse("yt_dlp", "favorites_playback_set", {
+        online_selected: this._orderedOnlineSelection(),
+        offline_selected: this._orderedOfflineSelection(),
+        repeat_mode: this._repeatMode,
+      });
+      if (generation === this._favoriteSettingsGeneration) {
+        this._favoriteSettingsDirty = false;
+        this._applyFavoritePlaybackState(response, true);
+        this._render();
+      }
+    } catch (error) {
+      if (generation === this._favoriteSettingsGeneration) {
+        this._favoriteSettingsDirty = false;
+        this._notify(`Không thể lưu lựa chọn Yêu thích: ${error?.message || error}`);
+      }
+    }
+  }
+
+  async _favoritePlaybackCommand(direction) {
+    if (!this._favoritePlaybackActive || !this._hass) return;
+    this._busy = true;
+    this._render();
+    try {
+      const response = await this._callServiceResponse("yt_dlp", "favorites_playback_skip", { direction });
+      this._applyFavoritePlaybackState(response, true);
+    } catch (error) {
+      this._notify(`Không thể chuyển bài Yêu thích: ${error?.message || error}`);
+    } finally {
+      this._busy = false;
+      this._render();
     }
   }
 
@@ -467,6 +647,49 @@ class YtDlpMediaCard extends HTMLElement {
       </div>`;
   }
 
+  _renderFavoritesPlayer(isPlaying) {
+    if (!this._favoritePlaybackActive) return "";
+    const state = this._state();
+    let { position, duration } = this._position(state);
+    const savedDuration = Number(this._favoritePlaybackCurrent?.duration || 0);
+    if (!(duration > 0) && savedDuration > 0) duration = savedDuration;
+    const progress = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
+    const volume = Math.round(Number(state?.attributes?.volume_level ?? 0) * 100);
+    const muted = Boolean(state?.attributes?.is_volume_muted);
+    const title = state?.attributes?.media_title || this._favoritePlaybackCurrent?.title || "Đang phát từ Yêu thích";
+    const artist = state?.attributes?.media_artist || this._favoritePlaybackCurrent?.artist || this._friendlyName(state);
+    const sourceLabel = this._favoritePlaybackKind === "offline" ? "Yêu thích · Offline" : "Yêu thích · Online";
+    return `
+      <section class="favorites-player">
+        <div class="favorites-player-head">
+          <div class="favorites-player-icon">${this._icon(isPlaying ? "equalizer" : "music-note")}</div>
+          <div class="favorites-player-copy">
+            <small>${this._escape(sourceLabel)}</small>
+            <strong title="${this._escape(title)}">${this._escape(title)}</strong>
+            <span>${this._escape(artist || "")}</span>
+          </div>
+        </div>
+        <div class="transport favorites-transport">
+          <div class="progress-head"><span id="elapsed">${this._formatTime(position)}</span><span id="duration">${this._formatTime(duration)}</span></div>
+          <input id="progress" class="range progress" type="range" min="0" max="${duration || 1}" step="1" value="${Math.min(position, duration || 1)}" style="--value:${progress}%" ${duration ? "" : "disabled"}>
+          <div class="controls">
+            <button class="icon-btn" id="previous" title="Bài trước">${this._icon("skip-previous")}</button>
+            <button class="icon-btn" id="stop" title="Dừng và xóa lựa chọn Yêu thích">${this._icon("stop")}</button>
+            <button class="play-btn ${this._busy ? "busy" : ""}" id="playPause" title="Phát / Tạm dừng">
+              ${this._busy ? this._icon("loading") : this._icon(isPlaying ? "pause" : "play")}
+            </button>
+            <button class="icon-btn" id="next" title="Bài tiếp">${this._icon("skip-next")}</button>
+            <button class="icon-btn" id="mute" title="Tắt tiếng">${this._icon(muted ? "volume-off" : "volume-high")}</button>
+          </div>
+          <div class="volume-row">
+            ${this._icon("volume-low")}
+            <input id="volume" class="range" type="range" min="0" max="100" value="${volume}" style="--value:${volume}%">
+            <span>${volume}%</span>
+          </div>
+        </div>
+      </section>`;
+  }
+
   _renderFavoritesView(players, isPlaying) {
     let panel = "";
     if (this._favoritesTab === "online") {
@@ -553,6 +776,7 @@ class YtDlpMediaCard extends HTMLElement {
 
     return `
       ${this._renderSpeakerPicker(players)}
+      ${this._renderFavoritesPlayer(isPlaying)}
       <nav class="tabs secondary-tabs favorite-tabs">
         <button data-favorites-tab="online" class="${this._favoritesTab === "online" ? "active" : ""}">${this._icon("cloud-outline")} <span>Online</span> <b>${this._favoritesLoaded ? this._favorites.length : "…"}</b></button>
         <button data-favorites-tab="offline" class="${this._favoritesTab === "offline" ? "active" : ""}">${this._icon("harddisk")} <span>Offline</span> <b>${this._libraryLoaded ? this._library.length : "…"}</b></button>
@@ -977,23 +1201,23 @@ class YtDlpMediaCard extends HTMLElement {
       button.addEventListener("click", () => this._playLibrary(Number(button.dataset.offlineIndex), false));
     });
     this.shadowRoot.querySelectorAll("[data-online-select]").forEach((button) => {
-      button.addEventListener("click", () => this._toggleSelection(this._onlineSelected, button.dataset.onlineSelect));
+      button.addEventListener("click", () => this._toggleSelection(this._onlineSelected, button.dataset.onlineSelect, "online"));
     });
     this.shadowRoot.querySelectorAll("[data-offline-select]").forEach((button) => {
-      button.addEventListener("click", () => this._toggleSelection(this._offlineSelected, button.dataset.offlineSelect));
+      button.addEventListener("click", () => this._toggleSelection(this._offlineSelected, button.dataset.offlineSelect, "offline"));
     });
     this.shadowRoot.querySelectorAll("[data-remove-favorite]").forEach((button) => {
       button.addEventListener("click", () => this._removeFavorite(button.dataset.removeFavorite));
     });
 
     $("selectAllOnline")?.addEventListener("click", () => this._selectAllFavorites("online"));
-    $("clearOnline")?.addEventListener("click", () => { this._onlineSelected.clear(); this._render(); });
+    $("clearOnline")?.addEventListener("click", () => { this._onlineSelected.clear(); this._schedulePersistFavoriteSettings(); this._render(); });
     $("playSelectedOnline")?.addEventListener("click", () => this._startQueue("online"));
     $("selectAllOffline")?.addEventListener("click", () => this._selectAllFavorites("offline"));
-    $("clearOffline")?.addEventListener("click", () => { this._offlineSelected.clear(); this._render(); });
+    $("clearOffline")?.addEventListener("click", () => { this._offlineSelected.clear(); this._schedulePersistFavoriteSettings(); this._render(); });
     $("playSelectedOffline")?.addEventListener("click", () => this._startQueue("offline"));
     this.shadowRoot.querySelectorAll("[data-repeat-mode]").forEach((button) => button.addEventListener("click", () => this._cycleRepeatMode()));
-    this.shadowRoot.querySelectorAll("[data-stop-favorites]").forEach((button) => button.addEventListener("click", () => this._stopPlayback()));
+    this.shadowRoot.querySelectorAll("[data-stop-favorites]").forEach((button) => button.addEventListener("click", () => this._stopFavoritesPlayback()));
 
     this.shadowRoot.querySelectorAll("[data-page-kind]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -1218,6 +1442,7 @@ class YtDlpMediaCard extends HTMLElement {
   }
 
   _ensureFavoritesTabLoaded() {
+    if (!this._favoritePlaybackLoaded && !this._favoritePlaybackLoading) this._loadFavoritePlaybackState();
     if (this._favoritesTab === "online" && !this._favoritesLoaded && !this._favoritesLoading) {
       this._loadFavorites();
     }
@@ -1233,10 +1458,15 @@ class YtDlpMediaCard extends HTMLElement {
     try {
       const response = await this._callServiceResponse("yt_dlp", "favorites_list");
       this._favorites = Array.isArray(response?.items) ? response.items : [];
-      if (this._queue?.kind === "online") this._queue = null;
       const valid = new Set(this._favorites.map((item) => item.url));
+      const selectedBefore = this._onlineSelected.size;
       this._onlineSelected = new Set([...this._onlineSelected].filter((url) => valid.has(url)));
       this._favoritesLoaded = true;
+      if (this._favoritePlaybackActive && this._favoritePlaybackKind === "online") {
+        const currentKey = this._favoritePlaybackQueue[this._favoritePlaybackCursor];
+        this._currentFavoriteIndex = this._favorites.findIndex((item) => item.url === currentKey);
+      }
+      if (this._favoritePlaybackLoaded && selectedBefore !== this._onlineSelected.size) this._schedulePersistFavoriteSettings();
     } catch (error) {
       this._notify(`Không thể tải Yêu thích Online: ${error?.message || error}`);
     } finally {
@@ -1277,17 +1507,17 @@ class YtDlpMediaCard extends HTMLElement {
       this._onlineSelected.delete(url);
       if (removedIndex === this._currentFavoriteIndex) this._currentFavoriteIndex = -1;
       else if (removedIndex >= 0 && removedIndex < this._currentFavoriteIndex) this._currentFavoriteIndex -= 1;
-      if (this._queue?.kind === "online") this._queue = null;
       this._render();
     } catch (error) {
       this._notify(`Không thể xóa Yêu thích: ${error?.message || error}`);
     }
   }
 
-  _toggleSelection(selection, key) {
+  _toggleSelection(selection, key, _kind) {
     if (!key) return;
     if (selection.has(key)) selection.delete(key);
     else selection.add(key);
+    this._schedulePersistFavoriteSettings();
     this._render();
   }
 
@@ -1297,37 +1527,56 @@ class YtDlpMediaCard extends HTMLElement {
     } else {
       this._offlineSelected = new Set(this._library.map((item) => item.id));
     }
+    this._schedulePersistFavoriteSettings();
     this._render();
   }
 
   _cycleRepeatMode() {
     const modes = ["off", "one", "all"];
     this._repeatMode = modes[(modes.indexOf(this._repeatMode) + 1) % modes.length];
-    if (this._repeatMode === "one" && !this._queue && ["playing", "paused", "buffering"].includes(this._state()?.state)) {
-      if (this._currentFavoriteIndex >= 0 && this._favorites[this._currentFavoriteIndex]) {
-        this._queue = { kind: "online", indexes: [this._currentFavoriteIndex], cursor: 0, started: true };
-        this._queueStartedAt = Date.now();
-      } else if (this._currentLibraryIndex >= 0 && this._library[this._currentLibraryIndex]) {
-        this._queue = { kind: "offline", indexes: [this._currentLibraryIndex], cursor: 0, started: true };
-        this._queueStartedAt = Date.now();
-      }
-    }
-    this._persistRepeatMode();
+    this._schedulePersistFavoriteSettings();
     this._render();
   }
 
   async _startQueue(kind) {
     if (!this._selectedPlayer) return this._notify("Hãy chọn loa trước khi phát.");
-    const indexes = kind === "online"
-      ? this._favorites.map((item, index) => this._onlineSelected.has(item.url) ? index : -1).filter((index) => index >= 0)
-      : this._library.map((item, index) => this._offlineSelected.has(item.id) ? index : -1).filter((index) => index >= 0);
-    if (!indexes.length) return this._notify("Hãy chọn ít nhất một bài để phát liên tiếp.");
-    this._queue = { kind, indexes, cursor: 0, started: false };
+    const queue = kind === "online"
+      ? this._favorites.filter((item) => this._onlineSelected.has(item.url)).map((item) => item.url)
+      : this._library.filter((item) => this._offlineSelected.has(item.id)).map((item) => item.id);
+    if (!queue.length) return this._notify("Hãy chọn ít nhất một bài để phát liên tiếp.");
+    await this._startFavoriteBackend(kind, queue, true, this._repeatMode);
+  }
+
+  async _startFavoriteBackend(kind, queue, replaceSelection, repeatMode) {
+    const selectedPlayers = this._targetPlayers();
+    if (!selectedPlayers.length || !queue.length || !this._hass) return;
+    this._queue = null;
     this._queueStopRequested = false;
-    await this._playQueueCurrent();
+    this._clearPlaybackInterruption();
+    this._activePlayback = null;
+    this._busy = true;
+    this._render();
+    try {
+      const response = await this._callServiceResponse("yt_dlp", "favorites_playback_start", {
+        kind,
+        queue,
+        media_players: selectedPlayers,
+        repeat_mode: repeatMode,
+        replace_selection: Boolean(replaceSelection),
+      });
+      this._favoriteSettingsDirty = false;
+      this._applyFavoritePlaybackState(response, true);
+    } catch (error) {
+      this._notify(`Không thể phát Yêu thích: ${error?.message || error}`);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
   }
 
   async _playQueueCurrent() {
+    // Kept only for stale in-memory queues created by an older card instance.
+    // New Favorites playback is owned by Home Assistant via _startFavoriteBackend.
     const queue = this._queue;
     if (!queue?.indexes?.length) return;
     const index = queue.indexes[queue.cursor];
@@ -1631,6 +1880,26 @@ class YtDlpMediaCard extends HTMLElement {
     }
   }
 
+  async _stopFavoritesPlayback() {
+    if (!this._hass) return;
+    const wasFavoritesActive = this._favoritePlaybackActive;
+    this._busy = true;
+    this._render();
+    try {
+      const response = await this._callServiceResponse("yt_dlp", "favorites_playback_stop");
+      this._favoriteSettingsDirty = false;
+      this._applyFavoritePlaybackState(response, true);
+      // Keep the toolbar Stop behavior intuitive even when the currently
+      // playing media was started from the Media Player tab.
+      if (!wasFavoritesActive && this._selectedPlayer) await this._callMediaService("media_stop");
+    } catch (error) {
+      this._notify(`Không thể dừng Yêu thích: ${error?.message || error}`);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
   async _stopPlayback() {
     if (!this._hass) return;
     if (!this._selectedPlayer) return this._notify("Chưa có loa được chọn.");
@@ -1640,42 +1909,27 @@ class YtDlpMediaCard extends HTMLElement {
     this._clearPlaybackInterruption();
     this._activePlayback = null;
     try {
-      await this._callMediaService("media_stop");
+      if (this._favoritePlaybackActive) {
+        const response = await this._callServiceResponse("yt_dlp", "favorites_playback_stop");
+        this._favoriteSettingsDirty = false;
+        this._applyFavoritePlaybackState(response, true);
+      } else {
+        await this._callMediaService("media_stop");
+      }
     } finally {
       this._queueStopRequested = false;
       this._render();
     }
   }
 
-  async _playFavorite(index, fromQueue = false) {
+  async _playFavorite(index, _fromQueue = false) {
     const item = this._favorites[index];
-    const selectedPlayers = this._targetPlayers();
-    if (!item || !selectedPlayers.length) return;
-    if (!fromQueue) {
-      this._queue = this._repeatMode === "one"
-        ? { kind: "online", indexes: [index], cursor: 0, started: false }
-        : null;
-      this._queueStopRequested = false;
-      this._queueStartedAt = Date.now();
-    }
-    this._busy = true;
+    if (!item || !this._targetPlayers().length) return;
     this._currentFavoriteIndex = index;
     this._currentLibraryIndex = -1;
     this._nowPlaying = item;
-    this._render();
-    try {
-      const response = selectedPlayers.length > 1
-        ? await this._callServiceResponse("yt_dlp", "play_multi", { url: item.url, media_players: selectedPlayers })
-        : await this._callServiceResponse("yt_dlp", "play", { url: item.url, media_player: this._selectedPlayer });
-      if (response) this._nowPlaying = { ...item, ...response };
-      this._activePlayback = { kind: "online", url: item.url };
-    } catch (error) {
-      this._queue = null;
-      this._notify(`Không thể phát bài Online: ${error?.message || error}`);
-    } finally {
-      this._busy = false;
-      this._render();
-    }
+    const repeatMode = this._repeatMode === "one" ? "one" : "off";
+    return this._startFavoriteBackend("online", [item.url], false, repeatMode);
   }
 
   async _loadLibrary(force) {
@@ -1685,11 +1939,16 @@ class YtDlpMediaCard extends HTMLElement {
     try {
       const response = await this._callServiceResponse("yt_dlp", "scan_library", { force: Boolean(force) });
       this._library = Array.isArray(response?.items) ? response.items : [];
-      if (this._queue?.kind === "offline") this._queue = null;
       const valid = new Set(this._library.map((item) => item.id));
+      const selectedBefore = this._offlineSelected.size;
       this._offlineSelected = new Set([...this._offlineSelected].filter((id) => valid.has(id)));
       this._libraryPath = response?.path || "";
       this._libraryLoaded = true;
+      if (this._favoritePlaybackActive && this._favoritePlaybackKind === "offline") {
+        const currentKey = this._favoritePlaybackQueue[this._favoritePlaybackCursor];
+        this._currentLibraryIndex = this._library.findIndex((item) => item.id === currentKey);
+      }
+      if (this._favoritePlaybackLoaded && selectedBefore !== this._offlineSelected.size) this._schedulePersistFavoriteSettings();
     } catch (error) {
       this._notify(`Không thể quét thư viện: ${error?.message || error}`);
     } finally {
@@ -1698,43 +1957,14 @@ class YtDlpMediaCard extends HTMLElement {
     }
   }
 
-  async _playLibrary(index, fromQueue = false) {
+  async _playLibrary(index, _fromQueue = false) {
     const item = this._library[index];
-    const selectedPlayers = this._targetPlayers();
-    if (!item || !selectedPlayers.length || !this._hass) return;
-    if (!fromQueue) {
-      this._queue = this._repeatMode === "one"
-        ? { kind: "offline", indexes: [index], cursor: 0, started: false }
-        : null;
-      this._queueStopRequested = false;
-      this._queueStartedAt = Date.now();
-    }
-    this._busy = true;
+    if (!item || !this._targetPlayers().length || !this._hass) return;
     this._currentLibraryIndex = index;
     this._currentFavoriteIndex = -1;
-    this._nowPlaying = { title: item.title || item.filename, artist: item.artist || "Không rõ ca sĩ", thumbnail: null };
-    this._render();
-    try {
-      const metadata = { title: item.title || item.filename };
-      if (item.artist) metadata.artist = item.artist;
-      await this._hass.callService(
-        "media_player",
-        "play_media",
-        {
-          media_content_id: item.media_content_id,
-          media_content_type: item.mime_type || "music",
-          extra: { metadata },
-        },
-        { entity_id: selectedPlayers.length === 1 ? selectedPlayers[0] : selectedPlayers }
-      );
-      this._activePlayback = { kind: "offline", id: item.id };
-    } catch (error) {
-      this._queue = null;
-      this._notify(`Không thể phát file: ${error?.message || error}`);
-    } finally {
-      this._busy = false;
-      this._render();
-    }
+    this._nowPlaying = { title: item.title || item.filename, artist: item.artist || "Không rõ ca sĩ", thumbnail: null, duration: item.duration };
+    const repeatMode = this._repeatMode === "one" ? "one" : "off";
+    return this._startFavoriteBackend("offline", [item.id], false, repeatMode);
   }
 
   async _playPause() {
@@ -1742,14 +1972,9 @@ class YtDlpMediaCard extends HTMLElement {
     const playerState = this._state()?.state;
     if (playerState === "playing") return this._callMediaService("media_pause");
     if (playerState === "paused") return this._callMediaService("media_play");
+    if (this._favoritePlaybackActive) return this._favoritePlaybackCommand("current");
 
     if (this._queue?.indexes?.length) return this._playQueueCurrent();
-    if (this._currentFavoriteIndex >= 0 && this._favorites[this._currentFavoriteIndex]) {
-      return this._playFavorite(this._currentFavoriteIndex, false);
-    }
-    if (this._currentLibraryIndex >= 0 && this._library[this._currentLibraryIndex]) {
-      return this._playLibrary(this._currentLibraryIndex, false);
-    }
     if (this._youtubeUrl.trim()) return this._playUrl();
     return this._callMediaService("media_play");
   }
@@ -1773,34 +1998,40 @@ class YtDlpMediaCard extends HTMLElement {
   }
 
   async _previous() {
+    if (this._favoritePlaybackActive && !this._favoritePlaybackSelectionBound) {
+      if (this._favoritePlaybackKind === "online" && this._currentFavoriteIndex >= 0 && this._favorites.length) {
+        const index = (this._currentFavoriteIndex - 1 + this._favorites.length) % this._favorites.length;
+        return this._playFavorite(index, false);
+      }
+      if (this._favoritePlaybackKind === "offline" && this._currentLibraryIndex >= 0 && this._library.length) {
+        const index = (this._currentLibraryIndex - 1 + this._library.length) % this._library.length;
+        return this._playLibrary(index, false);
+      }
+    }
+    if (this._favoritePlaybackActive) return this._favoritePlaybackCommand("previous");
     if (this._queue?.indexes?.length) {
       this._queue.cursor = Math.max(0, this._queue.cursor - 1);
       return this._playQueueCurrent();
-    }
-    if (this._currentFavoriteIndex >= 0 && this._favorites.length) {
-      const index = (this._currentFavoriteIndex - 1 + this._favorites.length) % this._favorites.length;
-      return this._playFavorite(index, false);
-    }
-    if (this._currentLibraryIndex >= 0 && this._library.length) {
-      const index = (this._currentLibraryIndex - 1 + this._library.length) % this._library.length;
-      return this._playLibrary(index, false);
     }
     return this._callMediaService("media_previous_track");
   }
 
   async _next() {
+    if (this._favoritePlaybackActive && !this._favoritePlaybackSelectionBound) {
+      if (this._favoritePlaybackKind === "online" && this._currentFavoriteIndex >= 0 && this._favorites.length) {
+        const index = (this._currentFavoriteIndex + 1) % this._favorites.length;
+        return this._playFavorite(index, false);
+      }
+      if (this._favoritePlaybackKind === "offline" && this._currentLibraryIndex >= 0 && this._library.length) {
+        const index = (this._currentLibraryIndex + 1) % this._library.length;
+        return this._playLibrary(index, false);
+      }
+    }
+    if (this._favoritePlaybackActive) return this._favoritePlaybackCommand("next");
     if (this._queue?.indexes?.length) {
       if (this._queue.cursor < this._queue.indexes.length - 1) this._queue.cursor += 1;
       else this._queue.cursor = this._repeatMode === "all" ? 0 : this._queue.cursor;
       return this._playQueueCurrent();
-    }
-    if (this._currentFavoriteIndex >= 0 && this._favorites.length) {
-      const index = (this._currentFavoriteIndex + 1) % this._favorites.length;
-      return this._playFavorite(index, false);
-    }
-    if (this._currentLibraryIndex >= 0 && this._library.length) {
-      const index = (this._currentLibraryIndex + 1) % this._library.length;
-      return this._playLibrary(index, false);
     }
     return this._callMediaService("media_next_track");
   }
@@ -1836,7 +2067,11 @@ class YtDlpMediaCard extends HTMLElement {
   _updateProgressOnly() {
     if (!this.shadowRoot || !this._hass) return;
     const state = this._state();
-    const { position, duration } = this._position(state);
+    let { position, duration } = this._position(state);
+    if (this._favoritePlaybackActive && !(duration > 0)) {
+      const savedDuration = Number(this._favoritePlaybackCurrent?.duration || 0);
+      if (savedDuration > 0) duration = savedDuration;
+    }
     const elapsed = this.shadowRoot.getElementById("elapsed");
     const durationEl = this.shadowRoot.getElementById("duration");
     const slider = this.shadowRoot.getElementById("progress");
@@ -1894,7 +2129,7 @@ class YtDlpMediaCard extends HTMLElement {
       .library-list{overflow:auto;margin:0 -4px;padding:2px 4px 4px;scrollbar-width:thin}.library-list.scroll-five{max-height:260px}
       .library-tools{gap:8px}.search-box{flex:1;height:42px;gap:8px;padding:0 12px;border-radius:13px;background:var(--surface-soft);border:1px solid var(--border)}.soft-btn{width:42px;height:42px;border-radius:13px;background:var(--surface)}.library-meta{justify-content:space-between;gap:8px;padding:9px 2px 7px;color:var(--muted);font-size:9px}.library-meta span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.track-row{width:100%;min-height:52px;gap:10px;text-align:left;border:0;border-radius:13px;padding:9px 10px;background:transparent;cursor:pointer}.track-row:hover,.track-row.selected{background:var(--surface)}.track-icon{width:34px;height:34px;flex:0 0 34px;border-radius:10px;display:grid;place-items:center;background:var(--surface);color:var(--muted)}.track-row.selected .track-icon{background:color-mix(in srgb,var(--accent) 18%,var(--card-bg));color:color-mix(in srgb,var(--accent) 80%,var(--text))}.track-icon ha-icon{--mdc-icon-size:18px}.track-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}.track-text strong,.track-text small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.track-text strong{font-size:12px;font-weight:750}.track-text small{font-size:9px;color:var(--muted)}.track-size{font-size:9px;color:var(--muted);white-space:nowrap}.row-play{opacity:.65;color:var(--text);transition:opacity .15s}.track-row:hover .row-play,.track-row.selected .row-play{opacity:1}.row-play ha-icon{--mdc-icon-size:18px}.empty{height:120px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--muted);font-size:12px}.empty.compact{height:86px}.empty ha-icon{--mdc-icon-size:20px}
       .player-url-panel{margin-top:12px}.heart-btn{width:38px;height:38px;flex:0 0 38px;border-radius:11px;color:color-mix(in srgb,var(--accent) 78%,var(--text))}.heart-btn:disabled{opacity:.4;cursor:default}
-      .favorite-tabs{margin-top:14px}.favorite-add{display:flex;align-items:center;gap:9px;padding:8px 8px 8px 13px;margin-bottom:9px;border-radius:16px;background:var(--surface-soft);border:1px solid var(--border)}.favorite-add>ha-icon{color:var(--muted);--mdc-icon-size:20px}.favorite-add input{min-width:0;flex:1;border:0;outline:0;color:var(--text);background:transparent}.favorite-add input::placeholder{color:color-mix(in srgb,var(--muted) 75%,transparent)}.favorite-tools{margin-bottom:8px}.selection-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}.selection-left,.selection-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.selection-left>span{font-size:9px;color:var(--muted);white-space:nowrap}.soft-btn.small{width:auto;height:32px;padding:0 9px;border-radius:10px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:9px;font-weight:750}.soft-btn.small:disabled{opacity:.4;cursor:default;transform:none}.soft-btn.small ha-icon{--mdc-icon-size:15px}.soft-btn.danger{color:#d63e50}.repeat-one,.repeat-all{color:color-mix(in srgb,var(--accent) 82%,var(--text));background:color-mix(in srgb,var(--accent) 11%,var(--card-bg))}.accent-btn.compact{height:32px;padding:0 10px;border-radius:10px;font-size:9px}.favorite-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 2px 7px;color:var(--muted);font-size:9px}.favorite-meta span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.favorite-list{max-height:520px;overflow:auto;overscroll-behavior:contain;padding-right:2px}.favorite-row{display:grid;grid-template-columns:32px minmax(0,1fr) 34px;align-items:center;gap:5px;min-height:64px;padding:5px;border-radius:14px}.favorite-row:hover,.favorite-row.selected{background:var(--surface-soft)}.check-btn,.delete-btn{width:32px;height:32px;border:0;border-radius:9px;display:grid;place-items:center;background:transparent;color:var(--muted);cursor:pointer}.check-btn:hover,.delete-btn:hover{background:var(--surface)}.check-btn.checked{color:color-mix(in srgb,var(--accent) 80%,var(--text))}.delete-btn:hover{color:#d63e50}.check-btn ha-icon,.delete-btn ha-icon{--mdc-icon-size:18px}.favorite-main{min-width:0;width:100%;border:0;background:transparent;display:flex;align-items:center;gap:10px;text-align:left;cursor:pointer;padding:3px}.favorite-thumb{width:52px;height:52px;flex:0 0 52px;border-radius:11px;display:grid;place-items:center;background:var(--surface);background-size:cover;background-position:center;color:var(--muted);overflow:hidden}.favorite-thumb.has-art{box-shadow:inset 0 0 0 1px var(--border-soft)}.favorite-thumb.local{background:color-mix(in srgb,var(--accent) 9%,var(--card-bg));color:color-mix(in srgb,var(--accent) 75%,var(--text))}.favorite-thumb ha-icon{--mdc-icon-size:23px}.favorite-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:5px}.favorite-copy strong,.favorite-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorite-copy strong{font-size:12px;font-weight:780}.favorite-copy small{font-size:9px;color:var(--muted)}.favorite-main .row-play{flex:0 0 auto;padding:0 3px}.favorite-row.selected .row-play{color:color-mix(in srgb,var(--accent) 80%,var(--text));opacity:1}
+      .favorites-player{margin-top:12px;padding:14px;border:1px solid var(--border);border-radius:18px;background:var(--surface-soft);box-shadow:0 8px 24px rgba(0,0,0,.06)}.favorites-player-head{display:flex;align-items:center;gap:11px;min-width:0}.favorites-player-icon{width:42px;height:42px;flex:0 0 42px;border-radius:13px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 13%,var(--card-bg));color:color-mix(in srgb,var(--accent) 82%,var(--text))}.favorites-player-icon ha-icon{--mdc-icon-size:22px}.favorites-player-copy{min-width:0;display:flex;flex:1;flex-direction:column;gap:2px}.favorites-player-copy small{font-size:8px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:color-mix(in srgb,var(--accent) 75%,var(--muted))}.favorites-player-copy strong,.favorites-player-copy span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorites-player-copy strong{font-size:12px}.favorites-player-copy span{font-size:9px;color:var(--muted)}.favorites-transport{padding-top:13px}.favorites-transport .controls{margin:15px 0 13px}.favorite-tabs{margin-top:14px}.favorite-add{display:flex;align-items:center;gap:9px;padding:8px 8px 8px 13px;margin-bottom:9px;border-radius:16px;background:var(--surface-soft);border:1px solid var(--border)}.favorite-add>ha-icon{color:var(--muted);--mdc-icon-size:20px}.favorite-add input{min-width:0;flex:1;border:0;outline:0;color:var(--text);background:transparent}.favorite-add input::placeholder{color:color-mix(in srgb,var(--muted) 75%,transparent)}.favorite-tools{margin-bottom:8px}.selection-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}.selection-left,.selection-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.selection-left>span{font-size:9px;color:var(--muted);white-space:nowrap}.soft-btn.small{width:auto;height:32px;padding:0 9px;border-radius:10px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:9px;font-weight:750}.soft-btn.small:disabled{opacity:.4;cursor:default;transform:none}.soft-btn.small ha-icon{--mdc-icon-size:15px}.soft-btn.danger{color:#d63e50}.repeat-one,.repeat-all{color:color-mix(in srgb,var(--accent) 82%,var(--text));background:color-mix(in srgb,var(--accent) 11%,var(--card-bg))}.accent-btn.compact{height:32px;padding:0 10px;border-radius:10px;font-size:9px}.favorite-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 2px 7px;color:var(--muted);font-size:9px}.favorite-meta span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.favorite-list{max-height:520px;overflow:auto;overscroll-behavior:contain;padding-right:2px}.favorite-row{display:grid;grid-template-columns:32px minmax(0,1fr) 34px;align-items:center;gap:5px;min-height:64px;padding:5px;border-radius:14px}.favorite-row:hover,.favorite-row.selected{background:var(--surface-soft)}.check-btn,.delete-btn{width:32px;height:32px;border:0;border-radius:9px;display:grid;place-items:center;background:transparent;color:var(--muted);cursor:pointer}.check-btn:hover,.delete-btn:hover{background:var(--surface)}.check-btn.checked{color:color-mix(in srgb,var(--accent) 80%,var(--text))}.delete-btn:hover{color:#d63e50}.check-btn ha-icon,.delete-btn ha-icon{--mdc-icon-size:18px}.favorite-main{min-width:0;width:100%;border:0;background:transparent;display:flex;align-items:center;gap:10px;text-align:left;cursor:pointer;padding:3px}.favorite-thumb{width:52px;height:52px;flex:0 0 52px;border-radius:11px;display:grid;place-items:center;background:var(--surface);background-size:cover;background-position:center;color:var(--muted);overflow:hidden}.favorite-thumb.has-art{box-shadow:inset 0 0 0 1px var(--border-soft)}.favorite-thumb.local{background:color-mix(in srgb,var(--accent) 9%,var(--card-bg));color:color-mix(in srgb,var(--accent) 75%,var(--text))}.favorite-thumb ha-icon{--mdc-icon-size:23px}.favorite-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:5px}.favorite-copy strong,.favorite-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorite-copy strong{font-size:12px;font-weight:780}.favorite-copy small{font-size:9px;color:var(--muted)}.favorite-main .row-play{flex:0 0 auto;padding:0 3px}.favorite-row.selected .row-play{color:color-mix(in srgb,var(--accent) 80%,var(--text));opacity:1}
       .pagination{justify-content:center;gap:5px;margin-top:8px;min-height:30px}.pagination button{min-width:29px;height:29px;padding:0 8px;border:1px solid var(--border-soft);border-radius:9px;background:var(--surface-soft);color:var(--muted);cursor:pointer;font-size:10px;font-weight:750}.pagination button:hover{color:var(--text);background:var(--surface)}.pagination button.active{border-color:color-mix(in srgb,var(--accent) 42%,transparent);background:color-mix(in srgb,var(--accent) 14%,var(--card-bg));color:color-mix(in srgb,var(--accent) 76%,var(--text))}.page-gap{color:var(--muted);font-size:10px}
       .download-hero{gap:11px;margin-bottom:12px;padding:12px 13px;border-radius:16px;background:color-mix(in srgb,var(--accent) 8%,var(--card-bg));border:1px solid color-mix(in srgb,var(--accent) 18%,var(--border))}.download-hero-icon{width:39px;height:39px;display:grid;place-items:center;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}.download-hero-icon ha-icon{--mdc-icon-size:22px}.download-hero>div:last-child{display:flex;flex-direction:column;gap:3px}.download-hero strong{font-size:13px}.download-hero span{font-size:9px;color:var(--muted)}
       .input-shell{min-width:0;display:flex;flex-direction:column;gap:7px;padding:10px 12px;border-radius:14px;background:var(--surface-soft);border:1px solid var(--border)}.input-shell.full{margin-bottom:9px}.input-shell>span{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:9px;font-weight:700}.input-shell>span ha-icon{--mdc-icon-size:15px}.input-shell input,.input-shell select{width:100%;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font-size:12px;font-weight:650}.input-shell input::placeholder{color:color-mix(in srgb,var(--muted) 70%,transparent)}.input-shell select{appearance:none}.option-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}.download-type{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:5px;border-radius:14px;background:var(--surface-soft);border:1px solid var(--border-soft)}.download-type button{height:38px;border:0;border-radius:10px;background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;font-size:11px;font-weight:750}.download-type button.active{color:#fff;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 68%,var(--accent)))}.download-type ha-icon{--mdc-icon-size:17px}
