@@ -16,7 +16,6 @@ class YtDlpMediaCard extends HTMLElement {
     this._favoritesLoaded = false;
     this._favoritesLoading = false;
     this._favoritesPage = 1;
-    this._favoritesScrollTop = { online: 0, offline: 0 };
     this._onlineQuery = "";
     this._onlineSelected = new Set();
     this._library = [];
@@ -60,6 +59,7 @@ class YtDlpMediaCard extends HTMLElement {
     this._speakerPickerOpen = false;
     this._speakerMenuScrollTop = 0;
     this._speakerCloseTimer = null;
+    this._favoritesViewportRestoreGeneration = 0;
 
     this._downloadForm = {
       url: "",
@@ -713,7 +713,7 @@ class YtDlpMediaCard extends HTMLElement {
           </div>
           ${this._renderSelectionToolbar("online", this._onlineSelected.size, this._favorites.length)}
           <div class="favorite-meta"><span>Danh sách được lưu trong Home Assistant</span><span>${filtered.length} / ${this._favorites.length} bài</span></div>
-          <div class="favorite-list" data-favorites-list="online">
+          <div class="favorite-list">
             ${this._favoritesLoading && !this._favoritesLoaded ? `<div class="empty">${this._icon("loading")} Đang tải danh sách yêu thích...</div>` : ""}
             ${!this._favoritesLoading && this._favoritesLoaded && !filtered.length ? `<div class="empty">${this._icon("heart-outline")} Chưa có bài Online yêu thích.</div>` : ""}
             ${page.items.map(({ item, index }) => {
@@ -751,7 +751,7 @@ class YtDlpMediaCard extends HTMLElement {
           </div>
           ${this._renderSelectionToolbar("offline", this._offlineSelected.size, this._library.length)}
           <div class="favorite-meta"><span>${this._escape(this._libraryPath || "Thư mục thư viện")}</span><span>${filtered.length} / ${this._library.length} bài</span></div>
-          <div class="favorite-list" data-favorites-list="offline">
+          <div class="favorite-list">
             ${this._libraryLoading && !this._libraryLoaded ? `<div class="empty">${this._icon("loading")} Đang quét thư viện...</div>` : ""}
             ${!this._libraryLoading && this._libraryLoaded && !filtered.length ? `<div class="empty">${this._icon("music-off")} Không tìm thấy file nhạc.</div>` : ""}
             ${page.items.map(({ item, index }) => {
@@ -939,27 +939,135 @@ class YtDlpMediaCard extends HTMLElement {
       </section>`;
   }
 
-  _captureFavoritesScroll() {
-    const list = this.shadowRoot?.querySelector("[data-favorites-list]");
-    const kind = list?.dataset?.favoritesList;
-    if (!list || !["online", "offline"].includes(kind)) return;
-    this._favoritesScrollTop[kind] = list.scrollTop;
+  _composedParent(node) {
+    if (!node) return null;
+    if (node.parentElement) return node.parentElement;
+    const root = node.getRootNode?.();
+    return root?.host || null;
   }
 
-  _restoreFavoritesScroll() {
-    if (this._view !== "favorites") return;
-    const kind = this._favoritesTab;
-    const list = this.shadowRoot?.querySelector(`[data-favorites-list="${kind}"]`);
-    if (!list) return;
-    list.scrollTop = Math.max(0, Number(this._favoritesScrollTop[kind]) || 0);
+  _captureFavoritesViewport() {
+    if (this._view !== "favorites" || !this.shadowRoot) return null;
+    const list = this.shadowRoot.querySelector(".favorite-list");
+    if (!list) return null;
+
+    const scrollers = [];
+    const seen = new Set();
+    let node = this;
+    for (let depth = 0; node && depth < 40; depth += 1) {
+      node = this._composedParent(node);
+      if (!node || seen.has(node)) continue;
+      seen.add(node);
+      try {
+        const top = Number(node.scrollTop) || 0;
+        const left = Number(node.scrollLeft) || 0;
+        const scrollHeight = Number(node.scrollHeight) || 0;
+        const clientHeight = Number(node.clientHeight) || 0;
+        if (top !== 0 || left !== 0 || scrollHeight > clientHeight + 1) {
+          scrollers.push({ node, top, left });
+        }
+      } catch (_error) {
+        // Some HA wrapper nodes do not expose writable scroll properties.
+      }
+    }
+
+    const rootScroller = document.scrollingElement;
+    let rootCaptured = scrollers.some((entry) => entry.node === rootScroller);
+    if (rootScroller && !rootCaptured) {
+      try {
+        const top = Number(rootScroller.scrollTop) || 0;
+        const left = Number(rootScroller.scrollLeft) || 0;
+        if (top !== 0 || left !== 0 || Number(rootScroller.scrollHeight) > Number(rootScroller.clientHeight) + 1) {
+          scrollers.push({ node: rootScroller, top, left });
+          rootCaptured = true;
+        }
+      } catch (_error) {
+        // Window fallback below covers browsers that hide scrollingElement.
+      }
+    }
+
+    const rect = list.getBoundingClientRect();
+    return {
+      kind: this._favoritesTab,
+      listTop: Number(rect.top) || 0,
+      listScrollTop: Number(list.scrollTop) || 0,
+      listScrollLeft: Number(list.scrollLeft) || 0,
+      scrollers,
+      rootCaptured,
+      windowX: Number(window.scrollX) || 0,
+      windowY: Number(window.scrollY) || 0,
+    };
+  }
+
+  _restoreFavoritesViewport(snapshot) {
+    if (!snapshot || this._view !== "favorites" || this._favoritesTab !== snapshot.kind) return;
+    const generation = ++this._favoritesViewportRestoreGeneration;
+
+    const apply = () => {
+      if (generation !== this._favoritesViewportRestoreGeneration) return;
+      if (this._view !== "favorites" || this._favoritesTab !== snapshot.kind) return;
+      const list = this.shadowRoot?.querySelector(".favorite-list");
+      if (!list) return;
+
+      // First undo any focus/scroll-anchor jump caused by replacing the card DOM.
+      for (const entry of snapshot.scrollers) {
+        try {
+          if (entry.node?.isConnected === false) continue;
+          entry.node.scrollTop = entry.top;
+          entry.node.scrollLeft = entry.left;
+        } catch (_error) {
+          // Ignore read-only or detached HA wrapper nodes.
+        }
+      }
+      if (!snapshot.rootCaptured) {
+        try {
+          window.scrollTo(snapshot.windowX, snapshot.windowY);
+        } catch (_error) {
+          // Embedded WebViews may not expose window scrolling.
+        }
+      }
+
+      // The Favorites player can appear above the list after pressing Play.
+      // Restore the list's own scroll position, then compensate the outer HA
+      // viewport for any height inserted above it so the touched row stays put.
+      list.scrollTop = snapshot.listScrollTop;
+      list.scrollLeft = snapshot.listScrollLeft;
+      const newTop = Number(list.getBoundingClientRect().top) || 0;
+      let remaining = newTop - snapshot.listTop;
+      if (Math.abs(remaining) <= 0.5) return;
+
+      for (const entry of snapshot.scrollers) {
+        try {
+          if (entry.node?.isConnected === false) continue;
+          const before = Number(entry.node.scrollTop) || 0;
+          entry.node.scrollTop = entry.top + remaining;
+          const consumed = (Number(entry.node.scrollTop) || 0) - entry.top;
+          remaining -= consumed;
+          if (Math.abs(remaining) <= 0.5) break;
+          if (Math.abs((Number(entry.node.scrollTop) || 0) - before) < 0.1 && consumed === 0) continue;
+        } catch (_error) {
+          // Try the next composed scroll container.
+        }
+      }
+
+      if (Math.abs(remaining) > 0.5 && !snapshot.rootCaptured) {
+        try {
+          window.scrollTo(snapshot.windowX, snapshot.windowY + remaining);
+        } catch (_error) {
+          // No writable page viewport; inner list position is still restored.
+        }
+      }
+    };
+
+    apply();
+    // Mobile HA/WebView can apply focus/scroll anchoring after the click handler.
+    // Re-apply once on the next frame, but cancel stale restores after a new render.
+    window.requestAnimationFrame?.(apply);
   }
 
   _render() {
     if (!this.shadowRoot) return;
-    // Favorites controls re-render the card. Preserve the list viewport before
-    // replacing Shadow DOM so selecting/repeating/stopping/removing a row does
-    // not jump the user back to the first favorite. This is UI state only.
-    this._captureFavoritesScroll();
+    const favoritesViewport = this._captureFavoritesViewport();
     const state = this._state();
     const players = this._players();
     const isPlaying = state?.state === "playing";
@@ -1057,7 +1165,7 @@ class YtDlpMediaCard extends HTMLElement {
       </ha-card>`;
 
     this._bindEvents();
-    this._restoreFavoritesScroll();
+    this._restoreFavoritesViewport(favoritesViewport);
   }
 
   _syncSpeakerPicker() {
@@ -1199,11 +1307,10 @@ class YtDlpMediaCard extends HTMLElement {
     $("refreshFavorites")?.addEventListener("click", () => this._loadFavorites());
     $("refreshLibrary")?.addEventListener("click", () => this._loadLibrary(true));
 
-    const bindSearch = (id, field, pageField, favoritesKind) => {
+    const bindSearch = (id, field, pageField) => {
       $(id)?.addEventListener("input", (event) => {
         this[field] = event.target.value;
         this[pageField] = 1;
-        if (["online", "offline"].includes(favoritesKind)) this._favoritesScrollTop[favoritesKind] = 0;
         const value = event.target.value;
         this._render();
         const search = this.shadowRoot.getElementById(id);
@@ -1213,8 +1320,8 @@ class YtDlpMediaCard extends HTMLElement {
         }
       });
     };
-    bindSearch("onlineSearch", "_onlineQuery", "_favoritesPage", "online");
-    bindSearch("offlineSearch", "_offlineQuery", "_libraryPage", "offline");
+    bindSearch("onlineSearch", "_onlineQuery", "_favoritesPage");
+    bindSearch("offlineSearch", "_offlineQuery", "_libraryPage");
 
     this.shadowRoot.querySelectorAll("[data-online-index]").forEach((button) => {
       button.addEventListener("click", () => this._playFavorite(Number(button.dataset.onlineIndex), false));
@@ -1244,14 +1351,8 @@ class YtDlpMediaCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-page-kind]").forEach((button) => {
       button.addEventListener("click", () => {
         const page = Number(button.dataset.page) || 1;
-        if (button.dataset.pageKind === "favorites-online") {
-          this._favoritesPage = page;
-          this._favoritesScrollTop.online = 0;
-        }
-        if (button.dataset.pageKind === "favorites-offline") {
-          this._libraryPage = page;
-          this._favoritesScrollTop.offline = 0;
-        }
+        if (button.dataset.pageKind === "favorites-online") this._favoritesPage = page;
+        if (button.dataset.pageKind === "favorites-offline") this._libraryPage = page;
         this._render();
       });
     });
@@ -1516,7 +1617,6 @@ class YtDlpMediaCard extends HTMLElement {
       this._favorites = [item, ...this._favorites.filter((entry) => entry.url !== item.url)];
       this._favoritesLoaded = true;
       this._favoritesPage = 1;
-      this._favoritesScrollTop.online = 0;
       if (this._favoriteUrl.trim() === url) this._favoriteUrl = "";
       this._notify(`Đã thêm Yêu thích: ${item.title || "YouTube audio"}`);
     } catch (error) {
@@ -2158,7 +2258,7 @@ class YtDlpMediaCard extends HTMLElement {
       .library-list{overflow:auto;margin:0 -4px;padding:2px 4px 4px;scrollbar-width:thin}.library-list.scroll-five{max-height:260px}
       .library-tools{gap:8px}.search-box{flex:1;height:42px;gap:8px;padding:0 12px;border-radius:13px;background:var(--surface-soft);border:1px solid var(--border)}.soft-btn{width:42px;height:42px;border-radius:13px;background:var(--surface)}.library-meta{justify-content:space-between;gap:8px;padding:9px 2px 7px;color:var(--muted);font-size:9px}.library-meta span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.track-row{width:100%;min-height:52px;gap:10px;text-align:left;border:0;border-radius:13px;padding:9px 10px;background:transparent;cursor:pointer}.track-row:hover,.track-row.selected{background:var(--surface)}.track-icon{width:34px;height:34px;flex:0 0 34px;border-radius:10px;display:grid;place-items:center;background:var(--surface);color:var(--muted)}.track-row.selected .track-icon{background:color-mix(in srgb,var(--accent) 18%,var(--card-bg));color:color-mix(in srgb,var(--accent) 80%,var(--text))}.track-icon ha-icon{--mdc-icon-size:18px}.track-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}.track-text strong,.track-text small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.track-text strong{font-size:12px;font-weight:750}.track-text small{font-size:9px;color:var(--muted)}.track-size{font-size:9px;color:var(--muted);white-space:nowrap}.row-play{opacity:.65;color:var(--text);transition:opacity .15s}.track-row:hover .row-play,.track-row.selected .row-play{opacity:1}.row-play ha-icon{--mdc-icon-size:18px}.empty{height:120px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--muted);font-size:12px}.empty.compact{height:86px}.empty ha-icon{--mdc-icon-size:20px}
       .player-url-panel{margin-top:12px}.heart-btn{width:38px;height:38px;flex:0 0 38px;border-radius:11px;color:color-mix(in srgb,var(--accent) 78%,var(--text))}.heart-btn:disabled{opacity:.4;cursor:default}
-      .favorites-player{margin-top:12px;padding:14px;border:1px solid var(--border);border-radius:18px;background:var(--surface-soft);box-shadow:0 8px 24px rgba(0,0,0,.06)}.favorites-player-head{display:flex;align-items:center;gap:11px;min-width:0}.favorites-player-icon{width:42px;height:42px;flex:0 0 42px;border-radius:13px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 13%,var(--card-bg));color:color-mix(in srgb,var(--accent) 82%,var(--text))}.favorites-player-icon ha-icon{--mdc-icon-size:22px}.favorites-player-copy{min-width:0;display:flex;flex:1;flex-direction:column;gap:2px}.favorites-player-copy small{font-size:8px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:color-mix(in srgb,var(--accent) 75%,var(--muted))}.favorites-player-copy strong,.favorites-player-copy span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorites-player-copy strong{font-size:12px}.favorites-player-copy span{font-size:9px;color:var(--muted)}.favorites-transport{padding-top:13px}.favorites-transport .controls{margin:15px 0 13px}.favorite-tabs{margin-top:14px}.favorite-add{display:flex;align-items:center;gap:9px;padding:8px 8px 8px 13px;margin-bottom:9px;border-radius:16px;background:var(--surface-soft);border:1px solid var(--border)}.favorite-add>ha-icon{color:var(--muted);--mdc-icon-size:20px}.favorite-add input{min-width:0;flex:1;border:0;outline:0;color:var(--text);background:transparent}.favorite-add input::placeholder{color:color-mix(in srgb,var(--muted) 75%,transparent)}.favorite-tools{margin-bottom:8px}.selection-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}.selection-left,.selection-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.selection-left>span{font-size:9px;color:var(--muted);white-space:nowrap}.soft-btn.small{width:auto;height:32px;padding:0 9px;border-radius:10px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:9px;font-weight:750}.soft-btn.small:disabled{opacity:.4;cursor:default;transform:none}.soft-btn.small ha-icon{--mdc-icon-size:15px}.soft-btn.danger{color:#d63e50}.repeat-one,.repeat-all{color:color-mix(in srgb,var(--accent) 82%,var(--text));background:color-mix(in srgb,var(--accent) 11%,var(--card-bg))}.accent-btn.compact{height:32px;padding:0 10px;border-radius:10px;font-size:9px}.favorite-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 2px 7px;color:var(--muted);font-size:9px}.favorite-meta span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.favorite-list{max-height:520px;overflow:auto;overscroll-behavior:contain;padding-right:2px}.favorite-row{display:grid;grid-template-columns:32px minmax(0,1fr) 34px;align-items:center;gap:5px;min-height:64px;padding:5px;border-radius:14px}.favorite-row:hover,.favorite-row.selected{background:var(--surface-soft)}.check-btn,.delete-btn{width:32px;height:32px;border:0;border-radius:9px;display:grid;place-items:center;background:transparent;color:var(--muted);cursor:pointer}.check-btn:hover,.delete-btn:hover{background:var(--surface)}.check-btn.checked{color:color-mix(in srgb,var(--accent) 80%,var(--text))}.delete-btn:hover{color:#d63e50}.check-btn ha-icon,.delete-btn ha-icon{--mdc-icon-size:18px}.favorite-main{min-width:0;width:100%;border:0;background:transparent;display:flex;align-items:center;gap:10px;text-align:left;cursor:pointer;padding:3px}.favorite-thumb{width:52px;height:52px;flex:0 0 52px;border-radius:11px;display:grid;place-items:center;background:var(--surface);background-size:cover;background-position:center;color:var(--muted);overflow:hidden}.favorite-thumb.has-art{box-shadow:inset 0 0 0 1px var(--border-soft)}.favorite-thumb.local{background:color-mix(in srgb,var(--accent) 9%,var(--card-bg));color:color-mix(in srgb,var(--accent) 75%,var(--text))}.favorite-thumb ha-icon{--mdc-icon-size:23px}.favorite-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:5px}.favorite-copy strong,.favorite-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorite-copy strong{font-size:12px;font-weight:780}.favorite-copy small{font-size:9px;color:var(--muted)}.favorite-main .row-play{flex:0 0 auto;padding:0 3px}.favorite-row.selected .row-play{color:color-mix(in srgb,var(--accent) 80%,var(--text));opacity:1}
+      .favorites-player{margin-top:12px;padding:14px;border:1px solid var(--border);border-radius:18px;background:var(--surface-soft);box-shadow:0 8px 24px rgba(0,0,0,.06)}.favorites-player-head{display:flex;align-items:center;gap:11px;min-width:0}.favorites-player-icon{width:42px;height:42px;flex:0 0 42px;border-radius:13px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 13%,var(--card-bg));color:color-mix(in srgb,var(--accent) 82%,var(--text))}.favorites-player-icon ha-icon{--mdc-icon-size:22px}.favorites-player-copy{min-width:0;display:flex;flex:1;flex-direction:column;gap:2px}.favorites-player-copy small{font-size:8px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:color-mix(in srgb,var(--accent) 75%,var(--muted))}.favorites-player-copy strong,.favorites-player-copy span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorites-player-copy strong{font-size:12px}.favorites-player-copy span{font-size:9px;color:var(--muted)}.favorites-transport{padding-top:13px}.favorites-transport .controls{margin:15px 0 13px}.favorite-tabs{margin-top:14px}.favorite-add{display:flex;align-items:center;gap:9px;padding:8px 8px 8px 13px;margin-bottom:9px;border-radius:16px;background:var(--surface-soft);border:1px solid var(--border)}.favorite-add>ha-icon{color:var(--muted);--mdc-icon-size:20px}.favorite-add input{min-width:0;flex:1;border:0;outline:0;color:var(--text);background:transparent}.favorite-add input::placeholder{color:color-mix(in srgb,var(--muted) 75%,transparent)}.favorite-tools{margin-bottom:8px}.selection-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}.selection-left,.selection-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.selection-left>span{font-size:9px;color:var(--muted);white-space:nowrap}.soft-btn.small{width:auto;height:32px;padding:0 9px;border-radius:10px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:9px;font-weight:750}.soft-btn.small:disabled{opacity:.4;cursor:default;transform:none}.soft-btn.small ha-icon{--mdc-icon-size:15px}.soft-btn.danger{color:#d63e50}.repeat-one,.repeat-all{color:color-mix(in srgb,var(--accent) 82%,var(--text));background:color-mix(in srgb,var(--accent) 11%,var(--card-bg))}.accent-btn.compact{height:32px;padding:0 10px;border-radius:10px;font-size:9px}.favorite-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 2px 7px;color:var(--muted);font-size:9px}.favorite-meta span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.favorite-list{max-height:520px;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;padding-right:2px}.favorite-row{display:grid;grid-template-columns:32px minmax(0,1fr) 34px;align-items:center;gap:5px;min-height:64px;padding:5px;border-radius:14px}.favorite-row:hover,.favorite-row.selected{background:var(--surface-soft)}.check-btn,.delete-btn{width:32px;height:32px;border:0;border-radius:9px;display:grid;place-items:center;background:transparent;color:var(--muted);cursor:pointer}.check-btn:hover,.delete-btn:hover{background:var(--surface)}.check-btn.checked{color:color-mix(in srgb,var(--accent) 80%,var(--text))}.delete-btn:hover{color:#d63e50}.check-btn ha-icon,.delete-btn ha-icon{--mdc-icon-size:18px}.favorite-main{min-width:0;width:100%;border:0;background:transparent;display:flex;align-items:center;gap:10px;text-align:left;cursor:pointer;padding:3px}.favorite-thumb{width:52px;height:52px;flex:0 0 52px;border-radius:11px;display:grid;place-items:center;background:var(--surface);background-size:cover;background-position:center;color:var(--muted);overflow:hidden}.favorite-thumb.has-art{box-shadow:inset 0 0 0 1px var(--border-soft)}.favorite-thumb.local{background:color-mix(in srgb,var(--accent) 9%,var(--card-bg));color:color-mix(in srgb,var(--accent) 75%,var(--text))}.favorite-thumb ha-icon{--mdc-icon-size:23px}.favorite-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:5px}.favorite-copy strong,.favorite-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorite-copy strong{font-size:12px;font-weight:780}.favorite-copy small{font-size:9px;color:var(--muted)}.favorite-main .row-play{flex:0 0 auto;padding:0 3px}.favorite-row.selected .row-play{color:color-mix(in srgb,var(--accent) 80%,var(--text));opacity:1}
       .pagination{justify-content:center;gap:5px;margin-top:8px;min-height:30px}.pagination button{min-width:29px;height:29px;padding:0 8px;border:1px solid var(--border-soft);border-radius:9px;background:var(--surface-soft);color:var(--muted);cursor:pointer;font-size:10px;font-weight:750}.pagination button:hover{color:var(--text);background:var(--surface)}.pagination button.active{border-color:color-mix(in srgb,var(--accent) 42%,transparent);background:color-mix(in srgb,var(--accent) 14%,var(--card-bg));color:color-mix(in srgb,var(--accent) 76%,var(--text))}.page-gap{color:var(--muted);font-size:10px}
       .download-hero{gap:11px;margin-bottom:12px;padding:12px 13px;border-radius:16px;background:color-mix(in srgb,var(--accent) 8%,var(--card-bg));border:1px solid color-mix(in srgb,var(--accent) 18%,var(--border))}.download-hero-icon{width:39px;height:39px;display:grid;place-items:center;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}.download-hero-icon ha-icon{--mdc-icon-size:22px}.download-hero>div:last-child{display:flex;flex-direction:column;gap:3px}.download-hero strong{font-size:13px}.download-hero span{font-size:9px;color:var(--muted)}
       .input-shell{min-width:0;display:flex;flex-direction:column;gap:7px;padding:10px 12px;border-radius:14px;background:var(--surface-soft);border:1px solid var(--border)}.input-shell.full{margin-bottom:9px}.input-shell>span{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:9px;font-weight:700}.input-shell>span ha-icon{--mdc-icon-size:15px}.input-shell input,.input-shell select{width:100%;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font-size:12px;font-weight:650}.input-shell input::placeholder{color:color-mix(in srgb,var(--muted) 70%,transparent)}.input-shell select{appearance:none}.option-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}.download-type{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:5px;border-radius:14px;background:var(--surface-soft);border:1px solid var(--border-soft)}.download-type button{height:38px;border:0;border-radius:10px;background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;font-size:11px;font-weight:750}.download-type button.active{color:#fff;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 68%,var(--accent)))}.download-type ha-icon{--mdc-icon-size:17px}
