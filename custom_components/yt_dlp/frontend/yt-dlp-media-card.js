@@ -1430,6 +1430,11 @@ class YtDlpMediaCard extends HTMLElement {
 
   _scheduleInterruptedResume(delay = 900) {
     if (!this._interruptedPlayback || this._resumeInFlight || this._queueStopRequested) return;
+    // Remote yt_dlp playback is restored by the integration backend so resume
+    // continues to work even when this dashboard/card is not open. Avoid a
+    // second frontend play_media call racing the backend. Local library files
+    // still use the card-side fallback because they bypass yt_dlp.play.
+    if (["online", "url"].includes(this._interruptedPlayback?.source?.kind)) return;
     this._clearResumeIdleTimer();
     this._resumeIdleTimer = window.setTimeout(() => {
       this._resumeIdleTimer = null;
