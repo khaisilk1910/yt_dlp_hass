@@ -24,6 +24,15 @@
     },
     "scan_library": {
       "service": "mdi:folder-music"
+    },
+    "favorites_list": {
+      "service": "mdi:heart-multiple-outline"
+    },
+    "favorites_add": {
+      "service": "mdi:heart-plus-outline"
+    },
+    "favorites_remove": {
+      "service": "mdi:heart-minus-outline"
     }
   }
 }

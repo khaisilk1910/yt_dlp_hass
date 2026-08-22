@@ -98,6 +98,31 @@
           "description": "Ignore the short library cache and scan the folder again now."
         }
       }
+    },
+    "favorites_list": {
+      "name": "List online favorites",
+      "description": "Returns the persistent list of saved online YouTube links used by the bundled dashboard card.",
+      "fields": {}
+    },
+    "favorites_add": {
+      "name": "Add online favorite",
+      "description": "Resolves YouTube metadata once and stores the stable link and display metadata in Home Assistant storage.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "YouTube or other yt-dlp-supported HTTP(S) media URL to save."
+        }
+      }
+    },
+    "favorites_remove": {
+      "name": "Remove online favorite",
+      "description": "Removes one saved online favorite by URL.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Canonical saved URL to remove."
+        }
+      }
     }
   },
   "exceptions": {
@@ -121,6 +146,9 @@
     },
     "library_scan_failed": {
       "message": "The music library scan failed: {error}"
+    },
+    "favorite_failed": {
+      "message": "Unable to update online favorites: {error}"
     }
   },
   "options": {

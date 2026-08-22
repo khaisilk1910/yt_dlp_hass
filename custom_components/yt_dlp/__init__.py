@@ -59,6 +59,9 @@ from .const import (
     SERVICE_PLAY,
     SERVICE_PLAY_MULTI,
     SERVICE_SCAN_LIBRARY,
+    SERVICE_FAVORITES_LIST,
+    SERVICE_FAVORITES_ADD,
+    SERVICE_FAVORITES_REMOVE,
     SERVICE_SEARCH,
     STATE_DOWNLOADER,
     VIDEO_FORMATS,
@@ -67,6 +70,7 @@ from .const import (
 )
 from .helpers import normalize_download_directory
 from .frontend import async_register_media_card
+from .favorites import FavoritesStore
 from .manager import DownloadRequest, YoutubeDlpManager
 from .media_http import YoutubeDlpMediaView, YoutubeDlpStreamView
 from .playback import PlaybackManager
@@ -211,6 +215,12 @@ SCAN_LIBRARY_SCHEMA = vol.Schema(
     }
 )
 
+FAVORITE_URL_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_URL): _http_url,
+    }
+)
+
 
 def _get_loaded_manager(hass: HomeAssistant) -> YoutubeDlpManager:
     """Return the single loaded manager or raise a user-facing action error."""
@@ -232,6 +242,18 @@ def get_playback_manager(hass: HomeAssistant) -> PlaybackManager:
     playback = getattr(manager, "playback_manager", None)
     if isinstance(playback, PlaybackManager):
         return playback
+    raise ServiceValidationError(
+        translation_domain=DOMAIN,
+        translation_key="not_configured",
+    )
+
+
+def get_favorites_store(hass: HomeAssistant) -> FavoritesStore:
+    """Return the persistent online-favorites store for the loaded entry."""
+    manager = _get_loaded_manager(hass)
+    store = getattr(manager, "favorites_store", None)
+    if isinstance(store, FavoritesStore):
+        return store
     raise ServiceValidationError(
         translation_domain=DOMAIN,
         translation_key="not_configured",
@@ -451,6 +473,31 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "items": items,
         }
 
+    async def async_favorites_list(call: ServiceCall) -> ServiceResponse:
+        """Return persistent online favorites without resolving media again."""
+        items = await get_favorites_store(hass).async_list()
+        return {"count": len(items), "items": items}
+
+    async def async_favorites_add(call: ServiceCall) -> ServiceResponse:
+        """Resolve stable YouTube metadata once and persist the favorite."""
+        playback = get_playback_manager(hass)
+        store = get_favorites_store(hass)
+        try:
+            info = await playback.async_resolve_stream(call.data[ATTR_URL])
+            item = await store.async_add(info.as_dict())
+        except Exception as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="favorite_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        return {"item": item}
+
+    async def async_favorites_remove(call: ServiceCall) -> ServiceResponse:
+        """Remove one favorite by its canonical URL."""
+        removed = await get_favorites_store(hass).async_remove(call.data[ATTR_URL])
+        return {"removed": removed}
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_DOWNLOAD,
@@ -507,6 +554,27 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         schema=SCAN_LIBRARY_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FAVORITES_LIST,
+        async_favorites_list,
+        schema=vol.Schema({}),
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FAVORITES_ADD,
+        async_favorites_add,
+        schema=FAVORITE_URL_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FAVORITES_REMOVE,
+        async_favorites_remove,
+        schema=FAVORITE_URL_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
     return True
 
 
@@ -525,6 +593,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_MEDIA_LIBRARY_PATH, download_path)
     )
     manager.playback_manager = PlaybackManager(hass, entry, library_path)
+    manager.favorites_store = FavoritesStore(hass)
     entry.runtime_data = manager
     manager.async_publish_state()
 

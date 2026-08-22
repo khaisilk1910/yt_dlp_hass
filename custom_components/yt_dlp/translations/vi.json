@@ -236,6 +236,31 @@
           "description": "Bỏ qua cache thư viện ngắn và quét lại thư mục ngay."
         }
       }
+    },
+    "favorites_list": {
+      "name": "Danh sách yêu thích online",
+      "description": "Trả về danh sách link YouTube yêu thích được lưu bền vững cho thẻ dashboard.",
+      "fields": {}
+    },
+    "favorites_add": {
+      "name": "Thêm yêu thích online",
+      "description": "Lấy metadata YouTube một lần rồi lưu link và thông tin hiển thị ổn định vào bộ nhớ Home Assistant.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Link YouTube hoặc HTTP(S) được yt-dlp hỗ trợ cần lưu."
+        }
+      }
+    },
+    "favorites_remove": {
+      "name": "Xóa yêu thích online",
+      "description": "Xóa một bài online yêu thích theo URL đã lưu.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "URL chuẩn của bài đã lưu cần xóa."
+        }
+      }
     }
   },
   "exceptions": {
@@ -256,6 +281,9 @@
     },
     "library_scan_failed": {
       "message": "Quét thư viện nhạc thất bại: {error}"
+    },
+    "favorite_failed": {
+      "message": "Không thể cập nhật danh sách yêu thích online: {error}"
     }
   },
   "selector": {

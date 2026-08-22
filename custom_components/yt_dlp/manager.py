@@ -676,7 +676,11 @@ class YoutubeDlpManager:
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": request.audio_format,
                     "preferredquality": quality,
-                }
+                },
+                {
+                    "key": "FFmpegMetadata",
+                    "add_metadata": True,
+                },
             ],
         }
 

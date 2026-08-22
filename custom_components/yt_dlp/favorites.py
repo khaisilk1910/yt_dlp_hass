@@ -64,6 +64,7 @@ class FavoritesStore:
             "artist": str(item.get("artist")) if item.get("artist") else None,
             "duration": item.get("duration"),
             "mime_type": str(item.get("mime_type")) if item.get("mime_type") else None,
+            "file_format": str(item.get("file_format")) if item.get("file_format") else None,
         }
         async with self._lock:
             self._items = [entry for entry in self._items if entry.get("url") != url]

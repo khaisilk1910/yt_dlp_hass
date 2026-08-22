@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import mimetypes
+import re
 from pathlib import Path, PurePosixPath
 import secrets
 import threading
@@ -72,6 +73,7 @@ class StreamInfo:
     artist: str | None
     duration: int | float | None
     mime_type: str
+    file_format: str
     webpage_url: str
     http_headers: dict[str, str]
     route_index: int
@@ -86,6 +88,7 @@ class StreamInfo:
             "artist": self.artist,
             "duration": self.duration,
             "mime_type": self.mime_type,
+            "file_format": self.file_format,
         }
 
 
@@ -116,6 +119,7 @@ class PlaybackManager:
         self._stream_lock = asyncio.Lock()
         self._library_cache: list[dict[str, Any]] | None = None
         self._library_cache_at = 0.0
+        self._library_metadata_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
         self._stream_sessions: dict[str, StreamSession] = {}
         self._javascript_runtime: tuple[str, str] | None | object = _JS_RUNTIME_UNSET
         self._javascript_runtime_lock = threading.Lock()
@@ -246,6 +250,7 @@ class PlaybackManager:
                         artist=artist,
                         duration=info.get("duration"),
                         mime_type=mime_type,
+                        file_format=ext or _format_from_mime(mime_type),
                         webpage_url=webpage_url,
                         http_headers=headers,
                         route_index=route_index,
@@ -407,10 +412,16 @@ class PlaybackManager:
                 mime_type = mimetypes.guess_type(path.name)[0] or _mime_from_suffix(
                     path.suffix
                 )
+                metadata = self._local_audio_metadata(
+                    path, relative_posix, stat.st_mtime_ns, stat.st_size
+                )
                 items.append(
                     {
                         "id": relative_posix,
-                        "title": path.stem,
+                        "title": metadata["title"],
+                        "artist": metadata["artist"],
+                        "duration": metadata["duration"],
+                        "file_format": path.suffix.lower().lstrip("."),
                         "filename": path.name,
                         "relative_path": relative_posix,
                         "media_content_id": (
@@ -426,6 +437,14 @@ class PlaybackManager:
             _LOGGER.warning("Unable to scan YouTube-DLP media library %s: %s", base, err)
             return []
 
+        # Drop metadata for files that no longer exist so repeated rescans stay bounded.
+        live_ids = {str(item["id"]) for item in items}
+        self._library_metadata_cache = {
+            key: value
+            for key, value in self._library_metadata_cache.items()
+            if key in live_ids
+        }
+
         # Downloads are usually what the user wants first; newest files therefore
         # appear at the top, with filename as a deterministic tie-breaker.
         items.sort(
@@ -435,6 +454,54 @@ class PlaybackManager:
             )
         )
         return items
+
+
+    def _local_audio_metadata(
+        self, path: Path, relative_posix: str, mtime_ns: int, size: int
+    ) -> dict[str, Any]:
+        """Read tags/duration cheaply and cache them until the file changes.
+
+        Mutagen reads container headers/tags instead of decoding the whole audio file.
+        This method only runs inside Home Assistant's executor as part of a user-driven
+        library scan, never on the event loop or during integration startup.
+        """
+        cached = self._library_metadata_cache.get(relative_posix)
+        if cached and cached[0] == mtime_ns and cached[1] == size:
+            return cached[2]
+
+        fallback_artist, fallback_title = _artist_title_from_stem(path.stem)
+        title = fallback_title
+        artist = fallback_artist
+        duration: float | None = None
+
+        try:
+            from mutagen import File as MutagenFile
+
+            audio = MutagenFile(path, easy=True)
+            if audio is not None:
+                info = getattr(audio, "info", None)
+                length = getattr(info, "length", None)
+                if isinstance(length, (int, float)) and length >= 0:
+                    duration = round(float(length), 3)
+
+                tags = getattr(audio, "tags", None)
+                if tags:
+                    tag_title = _first_tag_value(tags, "title")
+                    tag_artist = _first_tag_value(tags, "artist")
+                    if tag_title:
+                        title = tag_title
+                    if tag_artist:
+                        artist = tag_artist
+        except Exception as err:  # noqa: BLE001 - corrupt tags must not hide the file
+            _LOGGER.debug("Unable to read audio metadata for %s: %s", path, err)
+
+        metadata = {
+            "title": title or path.stem,
+            "artist": artist,
+            "duration": duration,
+        }
+        self._library_metadata_cache[relative_posix] = (mtime_ns, size, metadata)
+        return metadata
 
     def resolve_library_file(self, relative_path: str) -> Path | None:
         """Safely map a relative path to a real file. Executor thread only."""
@@ -461,6 +528,46 @@ class PlaybackManager:
             return None
         return candidate
 
+
+
+def _first_tag_value(tags: Any, key: str) -> str | None:
+    """Return one normalized easy-tag value without assuming a concrete mapping."""
+    try:
+        value = tags.get(key)
+    except (AttributeError, KeyError, TypeError):
+        return None
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _artist_title_from_stem(stem: str) -> tuple[str | None, str]:
+    """Best-effort fallback for common ``Artist - Title [video_id]`` names."""
+    value = re.sub(r"\s*\[[A-Za-z0-9_-]{6,}\]\s*$", "", stem).strip()
+    if " - " in value:
+        artist, title = value.split(" - ", 1)
+        if artist.strip() and title.strip():
+            return artist.strip(), title.strip()
+    return None, value
+
+
+def _format_from_mime(mime_type: str) -> str:
+    """Map a media MIME type to a compact format label for favorites."""
+    base = mime_type.split(";", 1)[0].strip().casefold()
+    return {
+        "audio/mp4": "m4a",
+        "audio/webm": "webm",
+        "audio/ogg": "ogg",
+        "audio/mpeg": "mp3",
+        "audio/flac": "flac",
+        "audio/wav": "wav",
+        "audio/aac": "aac",
+        "video/mp4": "mp4",
+        "video/webm": "webm",
+    }.get(base, "audio")
 
 def _best_thumbnail(info: dict[str, Any]) -> str | None:
     """Pick the best available thumbnail without exposing yt-dlp internals."""
