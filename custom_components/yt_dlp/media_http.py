@@ -17,7 +17,6 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .playback import STREAM_URL_PREFIX, _mime_from_suffix
 
 _LOGGER = logging.getLogger(__name__)
-_UPSTREAM_RETRY_STATUSES: Final = frozenset({401, 403, 404, 410, 416, 429})
 _RESPONSE_HEADERS: Final = (
     "Content-Type",
     "Content-Length",
@@ -41,6 +40,7 @@ _HOP_BY_HOP_HEADERS: Final = frozenset(
     }
 )
 _STREAM_TIMEOUT = ClientTimeout(total=None, connect=20, sock_connect=20, sock_read=60)
+_MAX_RELAY_CANDIDATES_PER_CLIENT: Final = 12
 
 
 class YoutubeDlpMediaView(HomeAssistantView):
@@ -135,56 +135,31 @@ class YoutubeDlpStreamView(HomeAssistantView):
     async def _open_upstream(
         self, request: web.Request, token: str, *, head_probe: bool
     ) -> ClientResponse:
-        """Open upstream, refreshing the yt-dlp URL on common expiry/reject codes."""
+        """Open upstream and walk real lower-quality formats when needed."""
         from . import get_playback_manager
 
         hass: HomeAssistant = request.app[KEY_HASS]
         manager = get_playback_manager(hass)
         client = async_get_clientsession(hass)
+        stream_session = manager.get_stream_session(token)
+        if stream_session is None:
+            raise web.HTTPNotFound(text="Playback stream has expired")
 
-        # The stream was already one-byte probed before play_media, so the first
-        # request should normally succeed. These bounded fallbacks are for an URL
-        # that expires later, a seek after expiry, or a YouTube client regression.
-        # Use positive client names only; never subtract a client from ``default``.
-        attempts = (
-            ("current", None, None),
-            ("refresh-current", False, None),
-            ("refresh-alternate", True, None),
-            ("android-vr", False, ("android_vr",)),
-            ("android-vr-alternate", True, ("android_vr",)),
-            ("web-embedded", False, ("web_embedded",)),
-            ("web-embedded-alternate", True, ("web_embedded",)),
-            ("web-safari", False, ("web_safari",)),
-            ("web-safari-alternate", True, ("web_safari",)),
-        )
         last_error: Exception | None = None
-        for label, advance_route, player_clients in attempts:
-            if advance_route is None:
-                stream_session = manager.get_stream_session(token)
-            else:
-                try:
-                    stream_session = await manager.async_refresh_stream(
-                        token,
-                        advance_route=advance_route,
-                        player_clients=player_clients,
-                    )
-                except Exception as err:  # noqa: BLE001 - continue with safe fallback
-                    last_error = err
-                    stream_session = None
 
-            if stream_session is None:
-                if label == "current":
-                    raise web.HTTPNotFound(text="Playback stream has expired")
-                continue
-
+        async def _open_current() -> ClientResponse | None:
+            nonlocal last_error
+            current_session = manager.get_stream_session(token)
+            if current_session is None:
+                return None
             headers = _upstream_headers(
-                stream_session.info.http_headers,
+                current_session.info.http_headers,
                 request,
                 head_probe=head_probe,
             )
             try:
                 response = await client.get(
-                    stream_session.info.url,
+                    current_session.info.url,
                     headers=headers,
                     allow_redirects=True,
                     timeout=_STREAM_TIMEOUT,
@@ -192,19 +167,62 @@ class YoutubeDlpStreamView(HomeAssistantView):
                 )
             except (ClientError, TimeoutError, OSError) as err:
                 last_error = err
-                continue
+                return None
 
-            if response.status not in _UPSTREAM_RETRY_STATUSES:
+            # Redirects are already followed. Any remaining 4xx/5xx response is
+            # unusable for Cast, regardless of whether YouTube used one of the
+            # small set of status codes seen in older releases.
+            if response.status < 400:
                 return response
 
             last_error = RuntimeError(
                 f"upstream media rejected relay request with HTTP {response.status}"
             )
             response.release()
+            return None
+
+        # First use the URL that was already probed before play_media. This avoids
+        # an unnecessary YouTube extraction for the common path.
+        response = await _open_current()
+        if response is not None:
+            return response
+
+        initial_clients = stream_session.info.player_clients
+        profiles: list[tuple[str, ...] | None] = [initial_clients]
+        for profile in (
+            ("default", "web_embedded"),
+            ("android_vr",),
+            ("web_embedded",),
+            ("web_safari",),
+        ):
+            if profile not in profiles:
+                profiles.append(profile)
+
+        # For each client, refresh the best candidate then keep moving down the
+        # actual extracted list. This is deliberately different from the old
+        # fixed ba/ba.2/b ladder: if YouTube changes the list, the relay still
+        # walks whatever direct formats really exist at that moment.
+        for profile in profiles:
+            for candidate_index in range(_MAX_RELAY_CANDIDATES_PER_CLIENT):
+                try:
+                    refreshed = await manager.async_refresh_stream(
+                        token,
+                        advance_route=candidate_index > 0,
+                        player_clients=profile,
+                    )
+                except Exception as err:  # noqa: BLE001 - yt-dlp public errors vary
+                    last_error = err
+                    break
+                if refreshed is None:
+                    break
+
+                response = await _open_current()
+                if response is not None:
+                    return response
 
         if last_error is not None:
             _LOGGER.warning(
-                "YouTube-DLP stream relay failed after bounded fallbacks: %s",
+                "YouTube-DLP stream relay failed after real-format fallbacks: %s",
                 last_error,
             )
             raise web.HTTPBadGateway(

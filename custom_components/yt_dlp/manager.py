@@ -42,9 +42,6 @@ from .notifications import async_send_download_notifications
 _LOGGER = logging.getLogger(__name__)
 _JS_RUNTIME_UNSET = object()
 _FFMPEG_LOCATION_UNSET = object()
-_MAX_AUDIO_SOURCE_ROUTES = 32
-_MAX_MUXED_SOURCE_ROUTES = 16
-_MAX_VIDEO_SOURCE_ROUTES = 12
 _MAX_PLAYER_RELOAD_RETRIES = 3
 _PLAYER_RELOAD_RETRY_DELAY_SECONDS = 0.6
 
@@ -53,12 +50,18 @@ _PLAYER_RELOAD_RETRY_DELAY_SECONDS = 0.6
 # retries the same profile with a fresh YoutubeDL session before moving through
 # independent client paths.  Avoid logged-out tv here because its formats may be
 # DRM-only under current YouTube behaviour.
-_YOUTUBE_DOWNLOAD_CLIENT_PROFILES: tuple[tuple[str, ...], ...] = (
+_YOUTUBE_DOWNLOAD_CLIENT_PROFILES: tuple[tuple[str, ...] | None, ...] = (
+    None,
     ("default", "web_embedded"),
     ("android_vr",),
     ("web_embedded",),
     ("web_safari",),
 )
+
+
+def _player_client_name(player_clients: tuple[str, ...] | None) -> str:
+    """Return a compact YouTube client name for retry logs."""
+    return ",".join(player_clients) if player_clients else "yt-dlp-default"
 
 
 @dataclass(slots=True)
@@ -494,7 +497,7 @@ class YoutubeDlpManager:
             _YOUTUBE_DOWNLOAD_CLIENT_PROFILES
         ):
             last_error = None
-            profile_name = ",".join(player_clients)
+            profile_name = _player_client_name(player_clients)
             attempt_index = 0
             reload_retries = 0
             while attempt_index < len(source_selectors):
@@ -603,7 +606,7 @@ class YoutubeDlpManager:
                 and self._should_retry_client_profile(last_error)
             ):
                 next_clients = _YOUTUBE_DOWNLOAD_CLIENT_PROFILES[profile_index + 1]
-                next_name = ",".join(next_clients)
+                next_name = _player_client_name(next_clients)
                 _LOGGER.warning(
                     "YouTube client %s failed for job %s (%s); retrying with %s",
                     profile_name,
@@ -710,19 +713,14 @@ class YoutubeDlpManager:
 
     @staticmethod
     def _audio_source_selectors() -> tuple[str, ...]:
-        """Return best-to-lower source routes for resilient audio downloads.
+        """Use yt-dlp's broad best-audio fallback instead of synthetic ba.N tiers.
 
-        Each selector is a separate yt-dlp attempt so an upstream failure on the
-        best URL can really move to the second-best URL, then the third-best, and
-        so on. Muxed formats are only used after the audio-only ladder is exhausted;
-        FFmpeg then extracts the requested final audio format.
+        With ``check_formats=selected``, yt-dlp filters out selected candidates
+        that are not actually downloadable. ``bestaudio/best`` then prefers the
+        highest-quality audio-only source and falls back to a muxed source when
+        the current YouTube client exposes no usable audio-only format.
         """
-        return tuple(
-            ["ba"]
-            + [f"ba.{index}" for index in range(2, _MAX_AUDIO_SOURCE_ROUTES + 1)]
-            + ["b"]
-            + [f"b.{index}" for index in range(2, _MAX_MUXED_SOURCE_ROUTES + 1)]
-        )
+        return ("bestaudio/best",)
 
     @staticmethod
     def _video_source_selectors(request: DownloadRequest) -> tuple[str, ...]:
@@ -733,26 +731,24 @@ class YoutubeDlpManager:
             else f"[height<=?{request.video_quality}]"
         )
 
-        # `check_formats=selected` already walks downward inside each selector
-        # until it finds a URL that is really downloadable. Keep the first route
-        # native to the requested container so the best case remains lossless.
-        # If YouTube exposes no usable native route, the generic route accepts
-        # any codecs/container and `_video_options` converts it only as a final
-        # fallback. This avoids both "Requested format is not available" and
-        # invalid WebM/MP4 stream-copy merges.
+        # Quality has priority over source container. Start with yt-dlp's best
+        # video+audio combination up to the requested height; `_video_options`
+        # uses a safe intermediate container when conversion to MP4/WebM is
+        # needed. A native-container route remains as the lower-risk fallback if
+        # the best generic combination cannot be downloaded on this client.
         generic = f"bv{height_filter}+ba/b{height_filter}"
         if request.video_format == "mp4":
             native = (
                 f"bv[ext=mp4]{height_filter}+ba[ext=m4a]/"
                 f"b[ext=mp4]{height_filter}"
             )
-            return (native, generic)
+            return (generic, native)
         if request.video_format == "webm":
             native = (
                 f"bv[ext=webm]{height_filter}+ba[ext=webm]/"
                 f"b[ext=webm]{height_filter}"
             )
-            return (native, generic)
+            return (generic, native)
         return (generic,)
 
     @staticmethod

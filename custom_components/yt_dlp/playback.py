@@ -63,8 +63,6 @@ _STREAM_PROBE_TIMEOUT = ClientTimeout(
 )
 _STREAM_PROBE_OK = frozenset({200, 206})
 _STREAM_PROBE_SWITCH_CLIENT = frozenset({401, 429})
-_MAX_AUDIO_QUALITY_ROUTES = 32
-_MAX_MUXED_QUALITY_ROUTES = 16
 _MAX_PLAYER_RELOAD_RETRIES = 3
 _PLAYER_RELOAD_RETRY_DELAY_SECONDS = 0.6
 
@@ -79,32 +77,18 @@ _ANNOUNCEMENT_SEEK_ATTEMPTS = 6
 _ANNOUNCEMENT_PLAYBACK_START_TIMEOUT_SECONDS = 12.0
 
 
-# YouTube currently has an intermittent player-response failure that surfaces as
-# "The page needs to be reloaded" before format selection even starts.  Start
-# with yt-dlp's documented default + web_embedded combination, then retry via
-# independent no/low-PO-token client paths.  Do not use the logged-out tv client
-# as a fallback: current yt-dlp guidance notes that its formats may be DRM-only.
-YOUTUBE_CLIENT_FALLBACKS: tuple[tuple[str, ...], ...] = (
+# Playback intentionally starts with yt-dlp's own current default client set.
+# The explicit fallbacks are only used when the default set exposes no direct
+# HTTP(S) audio-capable URL that Home Assistant can actually probe.  Keeping the
+# first profile as ``None`` avoids pinning playback to a client combination that
+# YouTube may change independently of yt-dlp's defaults.
+YOUTUBE_CLIENT_FALLBACKS: tuple[tuple[str, ...] | None, ...] = (
+    None,
     ("default", "web_embedded"),
     ("android_vr",),
     ("web_embedded",),
     ("web_safari",),
 )
-
-# Keep every quality step as a separate route. A slash-separated yt-dlp format
-# expression only falls back when a format is absent; it does not move to the
-# next-lower format when the selected GoogleVideo URL itself later returns 403.
-# Separate ``ba.N`` routes let both the initial probe and the relay refresh walk
-# from the best audio stream down through lower qualities. Progressive/muxed
-# ``b.N`` routes are the final fallback for sparse client profiles (for example
-# profiles that expose only format 18).
-STREAM_FORMAT_SELECTORS = tuple(
-    ["ba"]
-    + [f"ba.{index}" for index in range(2, _MAX_AUDIO_QUALITY_ROUTES + 1)]
-    + ["b"]
-    + [f"b.{index}" for index in range(2, _MAX_MUXED_QUALITY_ROUTES + 1)]
-)
-_FIRST_MUXED_ROUTE_INDEX = _MAX_AUDIO_QUALITY_ROUTES
 
 
 @dataclass(slots=True, frozen=True)
@@ -121,6 +105,7 @@ class StreamInfo:
     webpage_url: str
     http_headers: dict[str, str]
     route_index: int
+    format_id: str | None
     player_clients: tuple[str, ...] | None
 
     def as_dict(self) -> dict[str, Any]:
@@ -251,9 +236,11 @@ class PlaybackManager:
             service_data = {}
 
         if domain == "tts":
-            targets = _service_entity_ids(service_data.get("media_player_entity_id"))
-            if not targets:
-                targets = _service_entity_ids(service_data.get("entity_id"))
+            targets = _merge_entity_ids(
+                _service_entity_ids(service_data.get("media_player_entity_id")),
+                _service_entity_ids(service_data.get("entity_id")),
+                _event_target_entity_ids(data),
+            )
             for entity_id in targets:
                 self._mark_announcement(entity_id, f"tts.{service}")
             return
@@ -261,7 +248,10 @@ class PlaybackManager:
         if domain != "media_player":
             return
 
-        targets = _service_entity_ids(service_data.get("entity_id"))
+        targets = _merge_entity_ids(
+            _service_entity_ids(service_data.get("entity_id")),
+            _event_target_entity_ids(data),
+        )
         if not targets:
             return
 
@@ -600,15 +590,21 @@ class PlaybackManager:
         name, path = runtime
         return {name: {"path": path}}
 
-    async def async_resolve_stream(
+    async def async_resolve_stream_candidates(
         self,
         url: str,
-        route_indexes: tuple[int, ...] | None = None,
         *,
         player_clients: tuple[str, ...] | None = None,
-    ) -> StreamInfo:
-        """Resolve one usable upstream route without downloading the media."""
-        indexes = route_indexes or tuple(range(len(STREAM_FORMAT_SELECTORS)))
+    ) -> tuple[StreamInfo, ...]:
+        """Extract real direct playback candidates without forcing a format selector.
+
+        yt-dlp format expressions are deliberately not used here. YouTube can
+        expose a different subset of formats between extractions; asking for a
+        synthetic tier such as ``ba.2`` can therefore fail even though another
+        perfectly usable direct URL exists. Instead, extract the actual format
+        list, rank direct audio-capable HTTP(S) URLs, and let Home Assistant probe
+        them in best-to-worst order.
+        """
         async with self._stream_lock:
             yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
             youtube_dl_cls = youtube_dl_class(yt_dlp_module)
@@ -616,10 +612,9 @@ class PlaybackManager:
             while True:
                 try:
                     return await self.hass.async_add_executor_job(
-                        self._resolve_stream_sync,
+                        self._resolve_stream_candidates_sync,
                         url,
                         youtube_dl_cls,
-                        indexes,
                         player_clients,
                     )
                 except Exception as err:  # noqa: BLE001 - yt-dlp public errors vary
@@ -632,7 +627,7 @@ class PlaybackManager:
                             "YouTube player requested a page reload during stream "
                             "extraction (client=%s, retry %s/%s); retrying with a "
                             "fresh yt-dlp session",
-                            ",".join(player_clients or ("default",)),
+                            _player_client_name(player_clients),
                             reload_attempt + 1,
                             _MAX_PLAYER_RELOAD_RETRIES,
                         )
@@ -642,145 +637,129 @@ class PlaybackManager:
                         continue
                     raise
 
-    def _resolve_stream_sync(
+    def _resolve_stream_candidates_sync(
         self,
         url: str,
         youtube_dl_cls: type[Any],
-        route_indexes: tuple[int, ...],
         player_clients: tuple[str, ...] | None,
-    ) -> StreamInfo:
-        """Blocking yt-dlp metadata extraction. Executor thread only."""
+    ) -> tuple[StreamInfo, ...]:
+        """Return actual direct formats from one yt-dlp extraction."""
         from yt_dlp.utils import DownloadError
 
-        last_error: Exception | None = None
-        indexes = tuple(
-            index
-            for index in route_indexes
-            if 0 <= index < len(STREAM_FORMAT_SELECTORS)
-        )
-        position = 0
-        while position < len(indexes):
-            route_index = indexes[position]
-
-            opts: dict[str, Any] = {
-                "quiet": True,
-                "no_warnings": True,
-                "skip_download": True,
-                "noplaylist": True,
-                "format": STREAM_FORMAT_SELECTORS[route_index],
-                # Ask yt-dlp to reject selected URLs that cannot actually be
-                # opened. This makes `ba`/`b` automatically fall through to a
-                # lower downloadable format before the URL is handed to Cast.
-                "check_formats": "selected",
-                "socket_timeout": 20,
-                "retries": 3,
-                "extractor_retries": 2,
+        opts: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            # We need the extractor's real format list, not YoutubeDL's default
+            # format selection. ``process=False`` below avoids selection entirely;
+            # this option also prevents an extractor-level no-formats condition
+            # from discarding otherwise useful metadata before we can inspect it.
+            "ignore_no_formats_error": True,
+            "socket_timeout": 20,
+            "retries": 3,
+            "extractor_retries": 3,
+        }
+        if js_runtimes := self._js_runtime_options():
+            opts["js_runtimes"] = js_runtimes
+        if player_clients:
+            opts["extractor_args"] = {
+                "youtube": {"player_client": list(player_clients)}
             }
-            if js_runtimes := self._js_runtime_options():
-                opts["js_runtimes"] = js_runtimes
-            if player_clients:
-                # Use only positive client names. A negative/default expression
-                # can become an empty set when yt-dlp changes its default client
-                # preset, which produces "No player clients have been requested".
-                opts["extractor_args"] = {
-                    "youtube": {"player_client": list(player_clients)}
-                }
 
-            try:
-                with youtube_dl_cls(opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if not isinstance(info, dict):
-                        raise DownloadError("yt-dlp did not return media information")
+        with youtube_dl_cls(opts) as ydl:
+            info = ydl.extract_info(url, download=False, process=False)
+            if not isinstance(info, dict):
+                raise DownloadError("yt-dlp did not return media information")
 
-                    stream_url = info.get("url")
-                    if not isinstance(stream_url, str) or not stream_url.startswith(
-                        ("http://", "https://")
-                    ):
-                        raise DownloadError(
-                            "yt-dlp did not return a playable direct media URL"
-                        )
+            raw_formats = info.get("formats")
+            formats: list[dict[str, Any]] = []
+            if isinstance(raw_formats, list):
+                formats.extend(item for item in raw_formats if isinstance(item, dict))
+            # Some non-YouTube extractors return one direct URL instead of a
+            # ``formats`` list. Keep that supported without changing the public
+            # integration behaviour.
+            if not formats and isinstance(info.get("url"), str):
+                formats.append(info)
 
-                    headers: dict[str, str] = {}
-                    raw_headers = info.get("http_headers")
-                    if hasattr(raw_headers, "items"):
-                        headers.update(
-                            {
-                                str(key): str(value)
-                                for key, value in raw_headers.items()
-                                if value is not None
-                            }
-                        )
-                    # yt-dlp intentionally keeps cookies out of http_headers.
-                    # Capture only the cookies scoped to this selected media URL.
-                    try:
-                        cookie_header = ydl.cookiejar.get_cookie_header(stream_url)
-                    except (AttributeError, ValueError):
-                        cookie_header = None
-                    if cookie_header:
-                        headers["Cookie"] = str(cookie_header)
+            ranked = _rank_direct_playback_formats(formats)
+            if not ranked:
+                raise DownloadError(
+                    "yt-dlp returned no direct HTTP(S) audio-capable media format"
+                )
 
-                    ext = str(info.get("ext") or "").lower()
-                    acodec = str(info.get("acodec") or "").lower()
-                    vcodec = str(info.get("vcodec") or "").lower()
-                    mime_type = _stream_mime_type(ext, acodec, vcodec)
-                    thumbnail = _best_thumbnail(info)
-                    title = str(
-                        info.get("title") or info.get("fulltitle") or "YouTube audio"
-                    )
-                    artist_value = (
-                        info.get("artist") or info.get("channel") or info.get("uploader")
-                    )
-                    artist = str(artist_value) if artist_value else None
-                    webpage_url = str(
-                        info.get("webpage_url") or info.get("original_url") or url
-                    )
+            title = str(info.get("title") or info.get("fulltitle") or "YouTube audio")
+            thumbnail = _best_thumbnail(info)
+            artist_value = info.get("artist") or info.get("channel") or info.get("uploader")
+            artist = str(artist_value) if artist_value else None
+            duration = info.get("duration")
+            webpage_url = str(info.get("webpage_url") or info.get("original_url") or url)
+            base_headers = _string_headers(info.get("http_headers"))
 
-                    return StreamInfo(
+            candidates: list[StreamInfo] = []
+            seen_urls: set[str] = set()
+            for fmt in ranked:
+                stream_url = fmt.get("url")
+                if not isinstance(stream_url, str) or stream_url in seen_urls:
+                    continue
+                seen_urls.add(stream_url)
+
+                headers = dict(base_headers)
+                headers.update(_string_headers(fmt.get("http_headers")))
+                try:
+                    cookie_header = ydl.cookiejar.get_cookie_header(stream_url)
+                except (AttributeError, ValueError):
+                    cookie_header = None
+                if cookie_header:
+                    headers["Cookie"] = str(cookie_header)
+
+                ext = str(fmt.get("ext") or info.get("ext") or "").lower()
+                acodec = str(fmt.get("acodec") or info.get("acodec") or "").lower()
+                vcodec = str(fmt.get("vcodec") or info.get("vcodec") or "").lower()
+                mime_type = _stream_mime_type(ext, acodec, vcodec)
+                raw_format_id = fmt.get("format_id")
+                format_id = str(raw_format_id) if raw_format_id is not None else None
+
+                candidates.append(
+                    StreamInfo(
                         url=stream_url,
                         title=title,
                         thumbnail=thumbnail,
                         artist=artist,
-                        duration=info.get("duration"),
+                        duration=duration,
                         mime_type=mime_type,
                         file_format=ext or _format_from_mime(mime_type),
                         webpage_url=webpage_url,
                         http_headers=headers,
-                        route_index=route_index,
+                        route_index=len(candidates),
+                        format_id=format_id,
                         player_clients=player_clients,
                     )
-            except DownloadError as err:
-                last_error = err
-                if _requested_format_unavailable(err):
-                    # If one ba.N tier is absent, every later ba tier is absent
-                    # too. Relay refreshes may pass a long route list, so jump
-                    # straight to the first muxed/progressive route instead of
-                    # performing dozens of doomed YouTube extractions.
-                    if route_index < _FIRST_MUXED_ROUTE_INDEX:
-                        muxed_position = next(
-                            (
-                                candidate_position
-                                for candidate_position in range(position + 1, len(indexes))
-                                if indexes[candidate_position] >= _FIRST_MUXED_ROUTE_INDEX
-                            ),
-                            None,
-                        )
-                        if muxed_position is not None:
-                            position = muxed_position
-                            continue
-                    else:
-                        break
-                position += 1
+                )
 
-        if last_error is not None:
-            raise last_error
-        raise DownloadError("No supported playback route is available")
+            if not candidates:
+                raise DownloadError("yt-dlp returned no usable direct media URL")
+            return tuple(candidates)
+
+    async def async_resolve_stream(
+        self,
+        url: str,
+        route_indexes: tuple[int, ...] | None = None,
+        *,
+        player_clients: tuple[str, ...] | None = None,
+    ) -> StreamInfo:
+        """Resolve one candidate by best-to-worst rank for relay refreshes."""
+        candidates = await self.async_resolve_stream_candidates(
+            url, player_clients=player_clients
+        )
+        indexes = route_indexes or tuple(range(len(candidates)))
+        for index in indexes:
+            if 0 <= index < len(candidates):
+                return candidates[index]
+        raise RuntimeError("No requested direct playback candidate is available")
 
     async def async_create_stream(self, url: str) -> tuple[StreamInfo, str]:
         """Create a Home Assistant Media Source ID for one verified remote stream."""
-        # Verify the selected GoogleVideo URL from Home Assistant before handing
-        # it to Cast. YouTube increasingly rejects some client/format URLs with
-        # HTTP 403. A one-byte range probe lets us switch to a positive, known
-        # fallback client before the receiver sees a broken media URL.
         info = await self._async_resolve_playable_stream(url)
 
         now = time.monotonic()
@@ -799,44 +778,23 @@ class PlaybackManager:
         return info, f"media-source://yt_dlp/{STREAM_MEDIA_SOURCE_PREFIX}{token}"
 
     async def _async_resolve_playable_stream(self, url: str) -> StreamInfo:
-        """Resolve and probe a stream using bounded client/format fallbacks."""
+        """Probe actual direct formats from best quality down across clients."""
         last_error: Exception | None = None
 
         for player_clients in YOUTUBE_CLIENT_FALLBACKS:
-            switch_client = False
-            route_index = 0
-            while route_index < len(STREAM_FORMAT_SELECTORS):
-                try:
-                    info = await self.async_resolve_stream(
-                        url,
-                        (route_index,),
-                        player_clients=player_clients,
-                    )
-                except Exception as err:  # noqa: BLE001 - yt-dlp raises several public errors
-                    last_error = err
-                    if _no_player_clients_error(err):
-                        switch_client = True
-                        break
-                    if _requested_format_unavailable(err):
-                        # If the n'th audio-only format does not exist, no later
-                        # ba.N route can exist either. Jump straight to the best
-                        # progressive/muxed fallback. Likewise, once b.N is
-                        # absent there is nothing lower left on this client.
-                        if route_index < _FIRST_MUXED_ROUTE_INDEX:
-                            route_index = _FIRST_MUXED_ROUTE_INDEX
-                            continue
-                        break
-                    if _retry_lower_stream_route(err):
-                        route_index += 1
-                        continue
-                    switch_client = True
-                    break
+            try:
+                candidates = await self.async_resolve_stream_candidates(
+                    url, player_clients=player_clients
+                )
+            except Exception as err:  # noqa: BLE001 - yt-dlp public errors vary
+                last_error = err
+                continue
 
+            for info in candidates:
                 try:
                     status = await self._async_probe_stream(info)
                 except (ClientError, TimeoutError, OSError) as err:
                     last_error = err
-                    route_index += 1
                     continue
 
                 if status in _STREAM_PROBE_OK:
@@ -846,17 +804,9 @@ class PlaybackManager:
                     f"YouTube media URL rejected the probe with HTTP {status}"
                 )
                 if status in _STREAM_PROBE_SWITCH_CLIENT:
-                    # Authentication/rate-limit failures are normally tied to
-                    # the client profile rather than one quality tier.
-                    switch_client = True
                     break
-
-                # 403/404/410 and transient upstream failures can be tied to a
-                # specific GoogleVideo URL, so keep stepping down in quality.
-                route_index += 1
-
-            if switch_client:
-                continue
+                # 403/404/410/416 and similar rejections can be format-specific;
+                # keep stepping down through the *real* extracted candidates.
 
         if last_error is not None:
             raise last_error
@@ -907,35 +857,58 @@ class PlaybackManager:
         advance_route: bool,
         player_clients: tuple[str, ...] | None = None,
     ) -> StreamSession | None:
-        """Refresh an expired/rejected upstream URL, optionally changing route/client."""
+        """Refresh a relay URL from the latest real format list.
+
+        ``advance_route=False`` preserves the current format id when possible;
+        otherwise it chooses the same quality rank or the best available format.
+        ``advance_route=True`` intentionally moves to the next lower real format.
+        """
         session = self.get_stream_session(token)
         if session is None:
             return None
 
-        current = session.info.route_index
-        if advance_route:
-            # Cycle through every *other* route exactly once, then stop. The
-            # previous implementation only considered routes after the current
-            # index and could miss a known-good earlier route after a refresh.
-            indexes = (
-                tuple(range(current + 1, len(STREAM_FORMAT_SELECTORS)))
-                + tuple(range(0, current))
-            )
-            if not indexes:
-                indexes = (current,)
-        else:
-            indexes = (current,)
-
-        info = await self.async_resolve_stream(
-            session.source_url,
-            indexes,
-            player_clients=(
-                session.info.player_clients
-                if player_clients is None
-                else player_clients
-            ),
+        previous_clients = session.info.player_clients
+        selected_clients = previous_clients if player_clients is None else player_clients
+        switching_client = (
+            player_clients is not None and player_clients != previous_clients
         )
-        session.info = info
+        candidates = await self.async_resolve_stream_candidates(
+            session.source_url, player_clients=selected_clients
+        )
+        if not candidates:
+            return None
+
+        current_rank = session.info.route_index
+        current_format_id = session.info.format_id
+        matched_index = next(
+            (
+                index
+                for index, candidate in enumerate(candidates)
+                if current_format_id
+                and candidate.format_id == current_format_id
+            ),
+            None,
+        )
+
+        if advance_route:
+            base_index = matched_index if matched_index is not None else current_rank
+            selected_index = base_index + 1
+            if selected_index >= len(candidates):
+                return None
+        else:
+            if switching_client:
+                # A different client exposes its own independently sorted format
+                # list. Start from that client's best real candidate rather than
+                # carrying over an arbitrary numeric rank from the old client.
+                selected_index = 0
+            elif matched_index is not None:
+                selected_index = matched_index
+            elif 0 <= current_rank < len(candidates):
+                selected_index = current_rank
+            else:
+                selected_index = 0
+
+        session.info = candidates[selected_index]
         session.last_access = time.monotonic()
         return session
 
@@ -1131,6 +1104,25 @@ class PlaybackManager:
 
 
 
+def _merge_entity_ids(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    """Merge entity-id groups while preserving service target order."""
+    return tuple(dict.fromkeys(entity_id for group in groups for entity_id in group))
+
+
+def _event_target_entity_ids(event_data: dict[str, Any]) -> tuple[str, ...]:
+    """Read media-player entities from Home Assistant call_service target data.
+
+    Depending on how a service was invoked, Home Assistant may expose entity ids
+    in ``service_data`` or in the separate event ``target`` mapping. Supporting
+    both makes announcement capture work for Developer Tools, automations,
+    scripts, TTS helpers and direct service calls.
+    """
+    target = event_data.get("target")
+    if isinstance(target, dict):
+        return _service_entity_ids(target.get("entity_id"))
+    return ()
+
+
 def _service_entity_ids(value: object) -> tuple[str, ...]:
     """Normalize service entity-id fields without depending on target helpers."""
     if isinstance(value, str):
@@ -1216,6 +1208,95 @@ def _format_from_mime(mime_type: str) -> str:
         "video/mp4": "mp4",
         "video/webm": "webm",
     }.get(base, "audio")
+
+def _player_client_name(player_clients: tuple[str, ...] | None) -> str:
+    """Return a compact client label for logs."""
+    return ",".join(player_clients) if player_clients else "yt-dlp-default"
+
+
+def _string_headers(value: Any) -> dict[str, str]:
+    """Normalize yt-dlp header mappings without leaking non-string values."""
+    if not hasattr(value, "items"):
+        return {}
+    return {
+        str(key): str(item)
+        for key, item in value.items()
+        if item is not None
+    }
+
+
+def _float_value(value: Any) -> float:
+    """Return a sortable non-negative numeric metadata value."""
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _rank_direct_playback_formats(
+    formats: list[dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Return direct audio-capable formats in best-to-worst playback order.
+
+    Rank by actual audio bitrate/sample-rate/channels first. Audio-only is only a
+    tie-breaker, so a genuinely higher-quality muxed stream is not discarded just
+    to save video bandwidth. Manifest/fragments (HLS/DASH/SABR) are excluded
+    because this relay proxies one byte-addressable media resource, not an entire
+    manifest and its segment graph.
+    """
+    candidates: list[tuple[int, bool, dict[str, Any]]] = []
+
+    for original_index, fmt in enumerate(formats):
+        stream_url = fmt.get("url")
+        if not isinstance(stream_url, str) or not stream_url.startswith(("http://", "https://")):
+            continue
+
+        protocol = str(fmt.get("protocol") or "").casefold()
+        if protocol and protocol not in {"http", "https"}:
+            continue
+        fragments = fmt.get("fragments")
+        if isinstance(fragments, list) and fragments:
+            continue
+        if fmt.get("has_drm") is True:
+            continue
+
+        acodec = str(fmt.get("acodec") or "").casefold()
+        audio_ext = str(fmt.get("audio_ext") or "").casefold()
+        has_audio = (
+            acodec not in {"", "none", "null", "unknown"}
+            or audio_ext not in {"", "none", "null", "unknown"}
+            or isinstance(fmt.get("audio_channels"), (int, float))
+        )
+        if not has_audio:
+            continue
+
+        vcodec = str(fmt.get("vcodec") or "").casefold()
+        audio_only = vcodec in {"", "none", "null"}
+        candidates.append((original_index, audio_only, fmt))
+
+    def quality_key(
+        item: tuple[int, bool, dict[str, Any]],
+    ) -> tuple[float, ...]:
+        original_index, audio_only, fmt = item
+        abr = _float_value(fmt.get("abr"))
+        # For audio-only formats yt-dlp sometimes exposes only tbr; it is a useful
+        # audio bitrate fallback there. For muxed streams, tbr is dominated by
+        # video and must not be mistaken for audio quality.
+        effective_audio_bitrate = abr or (
+            _float_value(fmt.get("tbr")) if audio_only else 0.0
+        )
+        return (
+            effective_audio_bitrate,
+            _float_value(fmt.get("asr")),
+            _float_value(fmt.get("audio_channels")),
+            1.0 if audio_only else 0.0,
+            _float_value(fmt.get("filesize")) or _float_value(fmt.get("filesize_approx")),
+            float(original_index),
+        )
+
+    candidates.sort(key=quality_key, reverse=True)
+    return tuple(fmt for _, _, fmt in candidates)
+
 
 def _best_thumbnail(info: dict[str, Any]) -> str | None:
     """Pick the best available thumbnail without exposing yt-dlp internals."""
