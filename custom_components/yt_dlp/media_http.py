@@ -132,19 +132,22 @@ class YoutubeDlpStreamView(HomeAssistantView):
 
         # 1) current direct URL
         # 2) freshly resolve the same format route
-        # 3) try every other format route
+        # 3) retry that route with android_vr excluded
+        # 4) try another format with yt-dlp's normal client selection
+        # 5) finally combine another format with the safe client selection
         #
-        # yt-dlp 2026.08.19 already removed android_vr from its default clients
-        # and maintains its own YouTube client fallbacks. Never inject a custom
-        # player_client set here; doing so can produce an empty client set and
-        # break an otherwise valid Cast relay.
+        # The normal alternate route matters: a client-pinned extraction can have
+        # fewer formats than yt-dlp's defaults and must not be allowed to mask a
+        # usable stream with "Requested format is not available".
         attempts = (
-            ("current", None),
-            ("refresh", False),
-            ("alternate-route", True),
+            ("current", None, None),
+            ("refresh", False, None),
+            ("safe-client", False, True),
+            ("alternate-route", True, False),
+            ("safe-alternate-route", True, True),
         )
         last_error: Exception | None = None
-        for label, advance_route in attempts:
+        for label, advance_route, avoid_android_vr in attempts:
             if advance_route is None:
                 stream_session = manager.get_stream_session(token)
             else:
@@ -152,8 +155,9 @@ class YoutubeDlpStreamView(HomeAssistantView):
                     stream_session = await manager.async_refresh_stream(
                         token,
                         advance_route=advance_route,
+                        avoid_android_vr=avoid_android_vr,
                     )
-                except Exception as err:  # noqa: BLE001 - continue with route fallback
+                except Exception as err:  # noqa: BLE001 - continue with safe fallback
                     last_error = err
                     stream_session = None
 

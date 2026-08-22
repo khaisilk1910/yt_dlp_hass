@@ -58,16 +58,6 @@ class DownloadRequest:
 
 
 @dataclass(slots=True)
-class DownloadProgressPart:
-    """Progress snapshot for one yt-dlp media stream."""
-
-    downloaded_bytes: int = 0
-    total_bytes: int | None = None
-    speed: float | None = None
-    finished: bool = False
-
-
-@dataclass(slots=True)
 class DownloadJob:
     """Runtime information for one download."""
 
@@ -81,12 +71,12 @@ class DownloadJob:
     title: str | None = None
     downloaded_bytes: int = 0
     total_bytes: int | None = None
-    progress: float | None = None
+    progress_parts: dict[str, tuple[int, int | None]] = field(
+        default_factory=dict, repr=False
+    )
+    expected_download_bytes: int | None = field(default=None, repr=False)
     speed: float | None = None
     eta: float | None = None
-    expected_parts: int = 1
-    planned_total_bytes: int | None = None
-    progress_parts: dict[str, DownloadProgressPart] = field(default_factory=dict, repr=False)
     final_files: list[str] = field(default_factory=list)
     error: str | None = None
     metadata_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -262,7 +252,6 @@ class YoutubeDlpManager:
             if result.final_size is not None:
                 job.downloaded_bytes = result.final_size
                 job.total_bytes = result.final_size
-            job.progress = 100.0
             job.speed = job.speed or 0
             job.eta = 0
             job.error = None
@@ -320,22 +309,46 @@ class YoutubeDlpManager:
             # (formats, thumbnails, manifests, etc.). Do not queue that large
             # object onto Home Assistant's event loop every second.
             info = data.get("info_dict") or {}
-            expected_parts, planned_total_bytes = self._progress_plan(info)
+            overall_total_bytes: int | None = None
+            format_id: str | None = None
+            if isinstance(info, Mapping):
+                format_id = (
+                    str(info.get("format_id")) if info.get("format_id") else None
+                )
+                requested = info.get("requested_formats") or info.get(
+                    "requested_downloads"
+                )
+                if isinstance(requested, (list, tuple)) and requested:
+                    sizes: list[int] = []
+                    for item in requested:
+                        if not isinstance(item, Mapping):
+                            sizes = []
+                            break
+                        raw_size = item.get("filesize") or item.get(
+                            "filesize_approx"
+                        )
+                        try:
+                            size = int(raw_size) if raw_size else 0
+                        except (TypeError, ValueError):
+                            size = 0
+                        if size <= 0:
+                            sizes = []
+                            break
+                        sizes.append(size)
+                    if sizes:
+                        overall_total_bytes = sum(sizes)
+
             compact = {
                 "status": data.get("status"),
                 "filename": data.get("filename"),
                 "tmpfilename": data.get("tmpfilename"),
+                "format_id": format_id,
                 "downloaded_bytes": data.get("downloaded_bytes"),
                 "total_bytes": data.get("total_bytes"),
                 "total_bytes_estimate": data.get("total_bytes_estimate"),
+                "overall_total_bytes": overall_total_bytes,
                 "speed": data.get("speed"),
                 "eta": data.get("eta"),
-                "progress_idx": data.get("progress_idx"),
-                "max_progress": data.get("max_progress"),
-                "ctx_id": data.get("ctx_id"),
-                "expected_parts": expected_parts,
-                "planned_total_bytes": planned_total_bytes,
-                "format_id": info.get("format_id") if isinstance(info, Mapping) else None,
                 "title": info.get("title") if isinstance(info, Mapping) else None,
                 "info_filename": (
                     info.get("filename") if isinstance(info, Mapping) else None
@@ -370,60 +383,88 @@ class YoutubeDlpManager:
         extracted: Any = None
         last_error: Exception | None = None
 
-        # yt-dlp 2026.08.19 removed android_vr from its default YouTube clients
-        # and added maintained visionOS/web-embedded fallbacks. Do not override
-        # player_client here. A manual ``default,-android_vr`` retry can resolve
-        # to an empty client set and raises "No player clients have been requested".
-        # Keep only media-format retries; client selection stays fully owned by
-        # the installed yt-dlp release.
-        for attempt, audio_selector in enumerate(audio_selectors, start=1):
-            if job.cancel_event.is_set():
-                raise DownloadCancelled(
-                    "Download cancelled because the integration is unloading"
+        # First run is intentionally identical to the known-good 0.4.1 worker:
+        # let yt-dlp 2026.08.19 select its default YouTube clients. Only if the
+        # complete attempt set ends in an HTTP 403 do one clean retry explicitly
+        # excluding android_vr. This is a narrow fallback for stale/contaminated
+        # long-running interpreter state and for upstream client regressions; it
+        # never changes the successful path.
+        for client_fallback in (False, True):
+            last_error = None
+            for attempt, audio_selector in enumerate(audio_selectors, start=1):
+                if job.cancel_event.is_set():
+                    raise DownloadCancelled(
+                        "Download cancelled because the integration is unloading"
+                    )
+
+                # Preserve the known-good worker's temp layout on the normal
+                # path. The extra directory name exists only for the 403 client
+                # fallback, so a successful first pass is behaviorally identical.
+                if client_fallback:
+                    attempt_temp = os.path.join(job_temp, f"safe-attempt-{attempt}")
+                elif len(audio_selectors) > 1:
+                    attempt_temp = os.path.join(job_temp, f"attempt-{attempt}")
+                else:
+                    attempt_temp = job_temp
+                os.makedirs(attempt_temp, exist_ok=True)
+                ydl_opts = self._build_download_options(
+                    request,
+                    attempt_temp,
+                    progress_hook,
+                    postprocessor_hook,
+                    audio_source_selector=audio_selector,
+                    avoid_android_vr=client_fallback,
                 )
 
-            attempt_temp = (
-                os.path.join(job_temp, f"attempt-{attempt}")
-                if len(audio_selectors) > 1
-                else job_temp
-            )
-            os.makedirs(attempt_temp, exist_ok=True)
-            ydl_opts = self._build_download_options(
-                request,
-                attempt_temp,
-                progress_hook,
-                postprocessor_hook,
-                audio_source_selector=audio_selector,
-            )
+                try:
+                    with youtube_dl_cls(ydl_opts) as ydl:
+                        extracted = ydl.extract_info(request.url, download=True)
+                    last_error = None
+                    break
+                except DownloadCancelled:
+                    raise
+                except DownloadError as err:
+                    last_error = err
+                    if self._should_retry_audio_download(
+                        request, err, attempt, len(audio_selectors)
+                    ):
+                        next_selector = audio_selectors[attempt]
+                        _LOGGER.warning(
+                            "Audio source attempt %s/%s failed for job %s (%s); "
+                            "retrying with fallback selector %s",
+                            attempt,
+                            len(audio_selectors),
+                            job.job_id,
+                            self._short_error(err),
+                            next_selector,
+                        )
+                        shutil.rmtree(attempt_temp, ignore_errors=True)
+                        self.hass.add_job(
+                            self._reset_job_progress_for_retry, job.job_id
+                        )
+                        continue
+                    break
 
-            try:
-                with youtube_dl_cls(ydl_opts) as ydl:
-                    extracted = ydl.extract_info(request.url, download=True)
-                last_error = None
+            if extracted is not None:
                 break
-            except DownloadCancelled:
-                raise
-            except DownloadError as err:
-                last_error = err
-                if self._should_retry_audio_download(
-                    request, err, attempt, len(audio_selectors)
-                ):
-                    next_selector = audio_selectors[attempt]
-                    _LOGGER.warning(
-                        "Audio source attempt %s/%s failed for job %s (%s); "
-                        "retrying with fallback selector %s",
-                        attempt,
-                        len(audio_selectors),
-                        job.job_id,
-                        self._short_error(err),
-                        next_selector,
-                    )
-                    shutil.rmtree(attempt_temp, ignore_errors=True)
-                    self.hass.add_job(
-                        self._reset_job_progress_for_retry, job.job_id
-                    )
-                    continue
-                break
+
+            if (
+                not client_fallback
+                and last_error is not None
+                and self._is_http_403(last_error)
+            ):
+                _LOGGER.warning(
+                    "YouTube returned HTTP 403 for job %s; retrying once with "
+                    "android_vr excluded while preserving the same requested format",
+                    job.job_id,
+                )
+                shutil.rmtree(job_temp, ignore_errors=True)
+                os.makedirs(job_temp, exist_ok=True)
+                self.hass.add_job(self._reset_job_progress_for_retry, job.job_id)
+                continue
+
+            if last_error is not None:
+                raise last_error
 
         if extracted is None and last_error is not None:
             raise last_error
@@ -461,6 +502,7 @@ class YoutubeDlpManager:
         postprocessor_hook: Any,
         *,
         audio_source_selector: str | None = None,
+        avoid_android_vr: bool = False,
     ) -> dict[str, Any]:
         """Build controlled yt-dlp options from service fields."""
         opts: dict[str, Any] = {
@@ -481,7 +523,7 @@ class YoutubeDlpManager:
             "file_access_retries": 3,
             "socket_timeout": 30,
             "concurrent_fragment_downloads": 4,
-            "progress_delta": 1.0,
+            "progress_delta": 0.5,
             "progress_hooks": [progress_hook],
             "postprocessor_hooks": [postprocessor_hook],
             "restrictfilenames": False,
@@ -496,6 +538,15 @@ class YoutubeDlpManager:
 
         if js_runtimes := self._js_runtime_options():
             opts["js_runtimes"] = js_runtimes
+
+        if avoid_android_vr:
+            # API equivalent of:
+            # --extractor-args "youtube:player_client=default,-android_vr"
+            # Keep this strictly as a retry path; yt-dlp's defaults remain the
+            # first choice and can evolve independently in future releases.
+            opts["extractor_args"] = {
+                "youtube": {"player_client": ["default", "-android_vr"]}
+            }
 
         if request.media_type == MEDIA_TYPE_AUDIO:
             opts.update(self._audio_options(request, audio_source_selector))
@@ -549,6 +600,12 @@ class YoutubeDlpManager:
         return text[:240]
 
     @staticmethod
+    def _is_http_403(error: Exception) -> bool:
+        """Return whether yt-dlp reported an upstream HTTP 403 rejection."""
+        message = str(error).casefold()
+        return "http error 403" in message or "403: forbidden" in message
+
+    @staticmethod
     def _should_retry_audio_download(
         request: DownloadRequest,
         error: Exception,
@@ -566,164 +623,6 @@ class YoutubeDlpManager:
             or "requested format is not available" in message
         )
 
-    @staticmethod
-    def _progress_plan(info: Any) -> tuple[int | None, int | None]:
-        """Return selected stream count and total source bytes when yt-dlp knows them."""
-        if not isinstance(info, Mapping):
-            return None, None
-
-        requested = info.get("requested_formats")
-        if not isinstance(requested, (list, tuple)) or not requested:
-            format_id = str(info.get("format_id") or "")
-            part_ids = [item for item in format_id.split("+") if item]
-            return (len(part_ids), None) if len(part_ids) > 1 else (None, None)
-
-        total = 0
-        all_sizes_known = True
-        count = 0
-        for item in requested:
-            if not isinstance(item, Mapping):
-                continue
-            count += 1
-            raw_size = item.get("filesize") or item.get("filesize_approx")
-            try:
-                size = int(raw_size) if raw_size is not None else 0
-            except (TypeError, ValueError):
-                size = 0
-            if size > 0:
-                total += size
-            else:
-                all_sizes_known = False
-
-        if count < 1:
-            return None, None
-        return count, total if all_sizes_known and total > 0 else None
-
-    @staticmethod
-    def _progress_part_key(data: Mapping[str, Any]) -> str:
-        """Build a stable key for separate video/audio or parallel media streams."""
-        filename = data.get("filename") or data.get("tmpfilename")
-        progress_idx = data.get("progress_idx")
-        max_progress = data.get("max_progress")
-        if progress_idx is not None and max_progress:
-            return f"parallel:{progress_idx}:{filename or ''}"
-
-        if filename:
-            return f"file:{filename}"
-
-        ctx_id = data.get("ctx_id")
-        if ctx_id is not None:
-            return f"ctx:{ctx_id}"
-
-        format_id = data.get("format_id")
-        if format_id:
-            return f"format:{format_id}"
-        return "stream:0"
-
-    @staticmethod
-    def _positive_int(value: Any) -> int | None:
-        """Return a positive integer or None for unreliable progress metadata."""
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            return None
-        return number if number > 0 else None
-
-    def _update_job_transfer_progress(
-        self, job: DownloadJob, data: Mapping[str, Any], *, finished: bool
-    ) -> None:
-        """Aggregate yt-dlp stream callbacks into one monotonic transfer progress."""
-        expected_parts = self._positive_int(data.get("expected_parts"))
-        max_progress = self._positive_int(data.get("max_progress"))
-        if expected_parts:
-            job.expected_parts = max(job.expected_parts, expected_parts)
-        if max_progress:
-            job.expected_parts = max(job.expected_parts, max_progress)
-
-        planned_total = self._positive_int(data.get("planned_total_bytes"))
-        if planned_total:
-            job.planned_total_bytes = planned_total
-
-        key = self._progress_part_key(data)
-        part = job.progress_parts.get(key)
-        if part is None:
-            part = DownloadProgressPart()
-            job.progress_parts[key] = part
-
-        downloaded = max(0, int(data.get("downloaded_bytes") or 0))
-        total = self._positive_int(
-            data.get("total_bytes") or data.get("total_bytes_estimate")
-        )
-        part.downloaded_bytes = max(part.downloaded_bytes, downloaded)
-        if total is not None:
-            part.total_bytes = max(part.total_bytes or 0, total)
-        if finished:
-            part.finished = True
-            if part.total_bytes is None and part.downloaded_bytes > 0:
-                part.total_bytes = part.downloaded_bytes
-            elif part.total_bytes is not None:
-                part.downloaded_bytes = max(part.downloaded_bytes, part.total_bytes)
-
-        raw_speed = data.get("speed")
-        try:
-            part.speed = float(raw_speed) if raw_speed else None
-        except (TypeError, ValueError):
-            part.speed = None
-
-        aggregate_downloaded = sum(
-            max(0, item.downloaded_bytes) for item in job.progress_parts.values()
-        )
-        known_totals = [
-            item.total_bytes
-            for item in job.progress_parts.values()
-            if item.total_bytes is not None and item.total_bytes > 0
-        ]
-        all_expected_parts_seen = len(job.progress_parts) >= max(1, job.expected_parts)
-
-        aggregate_total: int | None = None
-        if (
-            job.planned_total_bytes is not None
-            and job.planned_total_bytes >= aggregate_downloaded
-        ):
-            aggregate_total = job.planned_total_bytes
-        elif all_expected_parts_seen and len(known_totals) == len(job.progress_parts):
-            aggregate_total = sum(known_totals)
-
-        if aggregate_total and aggregate_total > 0:
-            transfer_progress = aggregate_downloaded * 100.0 / aggregate_total
-        else:
-            # When yt-dlp does not expose every stream's byte size in advance,
-            # combine each stream's own progress. Unseen streams contribute 0%,
-            # so finishing video cannot falsely show 100% while audio is pending.
-            stage_sum = 0.0
-            for item in job.progress_parts.values():
-                if item.finished:
-                    stage_sum += 1.0
-                elif item.total_bytes and item.total_bytes > 0:
-                    stage_sum += min(0.999, item.downloaded_bytes / item.total_bytes)
-            transfer_progress = 100.0 * stage_sum / max(
-                job.expected_parts, len(job.progress_parts), 1
-            )
-
-        job.downloaded_bytes = aggregate_downloaded
-        job.total_bytes = aggregate_total
-        # 100% is reserved for the actual completed job. yt-dlp's "finished"
-        # callback means a source stream finished and post-processing may remain.
-        job.progress = round(max(0.0, min(99.0, transfer_progress)), 2)
-
-        active_speeds = [
-            item.speed for item in job.progress_parts.values() if item.speed and not item.finished
-        ]
-        job.speed = sum(active_speeds) if active_speeds else None
-        if aggregate_total and job.speed and job.speed > 0:
-            job.eta = max(0.0, (aggregate_total - aggregate_downloaded) / job.speed)
-        else:
-            raw_eta = data.get("eta")
-            try:
-                job.eta = float(raw_eta) if raw_eta is not None and not finished else None
-            except (TypeError, ValueError):
-                job.eta = None
-
     def _reset_job_progress_for_retry(self, job_id: str) -> None:
         """Clear stale byte counters before a different audio source retry."""
         job = self.jobs.get(job_id)
@@ -733,12 +632,10 @@ class YoutubeDlpManager:
         job.filename = None
         job.downloaded_bytes = 0
         job.total_bytes = None
-        job.progress = None
+        job.progress_parts.clear()
+        job.expected_download_bytes = None
         job.speed = None
         job.eta = None
-        job.expected_parts = 1
-        job.planned_total_bytes = None
-        job.progress_parts.clear()
         self.async_publish_state()
 
     @staticmethod
@@ -890,20 +787,76 @@ class YoutubeDlpManager:
             job.filename = os.path.basename(str(filename))
 
         status = data.get("status")
-        if status == "downloading":
-            job.status = "downloading"
-            self._update_job_transfer_progress(job, data, finished=False)
-            job.metadata_ready.set()
-        elif status == "finished":
-            self._update_job_transfer_progress(job, data, finished=True)
-            all_streams_finished = (
-                len(job.progress_parts) >= max(1, job.expected_parts)
-                and all(part.finished for part in job.progress_parts.values())
+        if status in ("downloading", "finished"):
+            part_key = str(
+                data.get("filename")
+                or data.get("tmpfilename")
+                or data.get("format_id")
+                or "main"
             )
-            job.status = "postprocessing" if all_streams_finished else "downloading"
-            if all_streams_finished:
-                job.speed = None
-                job.eta = None
+            previous_downloaded, previous_total = job.progress_parts.get(
+                part_key, (0, None)
+            )
+
+            raw_downloaded = data.get("downloaded_bytes")
+            try:
+                downloaded = (
+                    int(raw_downloaded)
+                    if raw_downloaded is not None
+                    else previous_downloaded
+                )
+            except (TypeError, ValueError):
+                downloaded = previous_downloaded
+
+            raw_total = data.get("total_bytes") or data.get("total_bytes_estimate")
+            try:
+                part_total = int(raw_total) if raw_total else previous_total
+            except (TypeError, ValueError):
+                part_total = previous_total
+
+            if status == "finished" and part_total and downloaded < part_total:
+                downloaded = part_total
+
+            job.progress_parts[part_key] = (max(0, downloaded), part_total)
+
+            raw_overall_total = data.get("overall_total_bytes")
+            try:
+                overall_total = int(raw_overall_total) if raw_overall_total else None
+            except (TypeError, ValueError):
+                overall_total = None
+            if overall_total and overall_total > 0:
+                job.expected_download_bytes = max(
+                    job.expected_download_bytes or 0, overall_total
+                )
+
+            job.downloaded_bytes = sum(
+                part_downloaded for part_downloaded, _ in job.progress_parts.values()
+            )
+            known_total = sum(
+                part_size or 0 for _, part_size in job.progress_parts.values()
+            )
+            target_total = job.expected_download_bytes or (known_total or None)
+            if target_total is not None:
+                job.total_bytes = max(target_total, job.downloaded_bytes)
+            else:
+                job.total_bytes = None
+
+            speed = data.get("speed")
+            job.speed = float(speed) if speed else None
+            eta = data.get("eta")
+            job.eta = float(eta) if eta is not None else None
+
+            if status == "downloading":
+                job.status = "downloading"
+            else:
+                download_complete = bool(
+                    job.total_bytes
+                    and job.downloaded_bytes >= job.total_bytes * 0.995
+                )
+                job.status = "postprocessing" if download_complete else "downloading"
+                if download_complete:
+                    job.speed = None
+                    job.eta = 0
             job.metadata_ready.set()
         elif status == "error":
             job.status = "error"
@@ -919,9 +872,6 @@ class YoutubeDlpManager:
             return
         if data.get("status") in ("started", "processing"):
             job.status = "postprocessing"
-            job.progress = 99.0
-            job.speed = None
-            job.eta = None
         self.async_publish_state()
 
     @callback
@@ -969,9 +919,17 @@ class YoutubeDlpManager:
     @staticmethod
     def job_response(job: DownloadJob) -> dict[str, Any]:
         """Convert a job to a JSON-safe action/state response."""
-        progress = job.progress
+        progress: float | None = None
         if job.status == "completed":
             progress = 100.0
+        elif job.total_bytes and job.total_bytes > 0:
+            progress = round(
+                min(99.4, job.downloaded_bytes * 100 / job.total_bytes), 2
+            )
+        elif job.status == "postprocessing":
+            # yt-dlp's postprocessor hook exposes state but not a reliable
+            # FFmpeg percentage. Reserve 100% strictly for a completed job.
+            progress = 99.0
         return {
             "job_id": job.job_id,
             "status": job.status,
