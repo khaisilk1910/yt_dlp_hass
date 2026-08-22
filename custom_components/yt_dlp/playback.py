@@ -183,13 +183,8 @@ class PlaybackManager:
             if js_runtimes := self._js_runtime_options():
                 opts["js_runtimes"] = js_runtimes
             if avoid_android_vr:
-                # Safe playback retry only. Do not mix this with yt-dlp's
-                # defaults: on 2026.08.x that can still select ANDROID_VR or
-                # produce an empty requested-client set when no JS runtime is
-                # installed. web_embedded is requested alone so the stream
-                # handed to Home Assistant's relay is genuinely non-android_vr.
                 opts["extractor_args"] = {
-                    "youtube": {"player_client": ["web_embedded"]}
+                    "youtube": {"player_client": ["default", "-android_vr"]}
                 }
 
             try:
