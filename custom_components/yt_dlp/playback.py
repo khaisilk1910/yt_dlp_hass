@@ -181,8 +181,18 @@ class PlaybackManager:
             if js_runtimes := self._js_runtime_options():
                 opts["js_runtimes"] = js_runtimes
             if avoid_android_vr:
+                # Do not use ``default,-android_vr`` here. yt-dlp resolves
+                # ``default`` dynamically and, for some runtime/client
+                # combinations, removing one client can leave an empty client
+                # set and raise "No player clients have been requested".
+                #
+                # yt-dlp 2026.08.19 uses visionOS as its JS-less playback
+                # default, while Android VR is known to return unusable/403
+                # media URLs. Add web_embedded as a secondary explicit client
+                # so made-for-kids videos still have a non-VR route when the
+                # primary client is unavailable.
                 opts["extractor_args"] = {
-                    "youtube": {"player_client": ["default", "-android_vr"]}
+                    "youtube": {"player_client": ["visionos", "web_embedded"]}
                 }
 
             try:
