@@ -16,7 +16,7 @@ import secrets
 import threading
 import time
 from typing import Any
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import quote
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -181,18 +181,13 @@ class PlaybackManager:
             if js_runtimes := self._js_runtime_options():
                 opts["js_runtimes"] = js_runtimes
             if avoid_android_vr:
-                # Do not use ``default,-android_vr`` here. yt-dlp resolves
-                # ``default`` dynamically and, for some runtime/client
-                # combinations, removing one client can leave an empty client
-                # set and raise "No player clients have been requested".
-                #
-                # yt-dlp 2026.08.19 uses visionOS as its JS-less playback
-                # default, while Android VR is known to return unusable/403
-                # media URLs. Add web_embedded as a secondary explicit client
-                # so made-for-kids videos still have a non-VR route when the
-                # primary client is unavailable.
+                # Keep yt-dlp's own current default client selection and only
+                # remove android_vr. This is deliberately better than pinning
+                # visionos/web_embedded: the available formats and fallback
+                # clients vary by video, authentication state and JS runtime.
+                # yt-dlp 2026.08.19 explicitly supports ``default,-CLIENT``.
                 opts["extractor_args"] = {
-                    "youtube": {"player_client": ["visionos", "web_embedded"]}
+                    "youtube": {"player_client": ["default", "-android_vr"]}
                 }
 
             try:
@@ -230,7 +225,8 @@ class PlaybackManager:
 
                     ext = str(info.get("ext") or "").lower()
                     acodec = str(info.get("acodec") or "").lower()
-                    mime_type = _stream_mime_type(ext, acodec)
+                    vcodec = str(info.get("vcodec") or "").lower()
+                    mime_type = _stream_mime_type(ext, acodec, vcodec)
                     thumbnail = _best_thumbnail(info)
                     title = str(
                         info.get("title") or info.get("fulltitle") or "YouTube audio"
@@ -266,26 +262,13 @@ class PlaybackManager:
         """Create a Home Assistant Media Source ID for one remote stream."""
         info = await self.async_resolve_stream(url)
 
-        # yt-dlp 2026 has seen intermittent android_vr GVS 403 regressions. The
-        # normal/default extraction remains first, matching the known-good
-        # integration. If the selected media URL itself identifies ANDROID_VR,
-        # re-resolve once with that client excluded before handing the relay to a
-        # speaker. This is network work only when the user presses Play.
-        if _is_android_vr_stream_url(info.url):
-            _LOGGER.warning(
-                "YouTube selected an android_vr playback URL; resolving a "
-                "non-android_vr route before sending media to the player"
-            )
-            safe_routes = (info.route_index,) + tuple(
-                index
-                for index in range(len(STREAM_FORMAT_SELECTORS))
-                if index != info.route_index
-            )
-            info = await self.async_resolve_stream(
-                url,
-                safe_routes,
-                avoid_android_vr=True,
-            )
+        # Do not pre-emptively re-resolve merely because the selected GoogleVideo
+        # URL contains ``c=ANDROID_VR``. yt-dlp/YouTube can expose a client marker
+        # that does not reliably identify the extractor route, and the v0.4.7
+        # eager fallback could turn an otherwise usable stream into
+        # "Requested format is not available" before Home Assistant even called
+        # media_player.play_media. The relay below already tests the real upstream
+        # response and only changes client/format after an actual rejection.
 
         now = time.monotonic()
         self._prune_stream_sessions(now)
@@ -325,9 +308,15 @@ class PlaybackManager:
 
         current = session.info.route_index
         if advance_route:
-            indexes = tuple(range(current + 1, len(STREAM_FORMAT_SELECTORS)))
+            # Cycle through every *other* route exactly once, then stop. The
+            # previous implementation only considered routes after the current
+            # index and could miss a known-good earlier route after a refresh.
+            indexes = (
+                tuple(range(current + 1, len(STREAM_FORMAT_SELECTORS)))
+                + tuple(range(0, current))
+            )
             if not indexes:
-                indexes = tuple(range(len(STREAM_FORMAT_SELECTORS)))
+                indexes = (current,)
         else:
             indexes = (current,)
 
@@ -486,17 +475,13 @@ def _best_thumbnail(info: dict[str, Any]) -> str | None:
     return None
 
 
-def _is_android_vr_stream_url(url: str) -> bool:
-    """Return whether a selected GoogleVideo URL identifies the android_vr client."""
-    try:
-        client = parse_qs(urlsplit(url).query).get("c", [])
-    except ValueError:
-        return False
-    return any(str(value).casefold() == "android_vr" for value in client)
-
-
-def _stream_mime_type(ext: str, acodec: str) -> str:
-    """Return a speaker-friendly MIME type for a selected yt-dlp format."""
+def _stream_mime_type(ext: str, acodec: str, vcodec: str = "") -> str:
+    """Return an accurate speaker-friendly MIME type for a selected format."""
+    has_video = bool(vcodec and vcodec not in {"none", "null"})
+    if has_video and ext == "mp4":
+        return "video/mp4"
+    if has_video and ext == "webm":
+        return "video/webm"
     if ext in ("m4a", "mp4") or acodec.startswith("mp4a"):
         return "audio/mp4"
     if ext in ("webm", "weba"):

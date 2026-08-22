@@ -132,13 +132,19 @@ class YoutubeDlpStreamView(HomeAssistantView):
 
         # 1) current direct URL
         # 2) freshly resolve the same format route
-        # 3) on a persistent rejection, explicitly exclude android_vr
-        # 4) finally try another independent audio route with that safe client set
+        # 3) retry that route with android_vr excluded
+        # 4) try another format with yt-dlp's normal client selection
+        # 5) finally combine another format with the safe client selection
+        #
+        # The normal alternate route matters: a client-pinned extraction can have
+        # fewer formats than yt-dlp's defaults and must not be allowed to mask a
+        # usable stream with "Requested format is not available".
         attempts = (
             ("current", None, None),
             ("refresh", False, None),
             ("safe-client", False, True),
-            ("alternate-route", True, True),
+            ("alternate-route", True, False),
+            ("safe-alternate-route", True, True),
         )
         last_error: Exception | None = None
         for label, advance_route, avoid_android_vr in attempts:

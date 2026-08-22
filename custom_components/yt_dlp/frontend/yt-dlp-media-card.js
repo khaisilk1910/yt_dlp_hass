@@ -1068,8 +1068,18 @@ class YtDlpMediaCard extends HTMLElement {
 
   async _playPause() {
     if (!this._selectedPlayer || this._busy) return;
-    const state = this._state();
-    await this._callMediaService(state?.state === "playing" ? "media_pause" : "media_play");
+    const playerState = this._state()?.state;
+    if (playerState === "playing") return this._callMediaService("media_pause");
+    if (playerState === "paused") return this._callMediaService("media_play");
+
+    // Cast raises "PLAY command requested but no session is active" when it is
+    // idle/off and there is no resumable session. In that state, restart the
+    // media through play_media instead of issuing a bare media_play command.
+    if (this._currentLibraryIndex >= 0 && this._library[this._currentLibraryIndex]) {
+      return this._playLibrary(this._currentLibraryIndex);
+    }
+    if (this._youtubeUrl.trim()) return this._playUrl();
+    return this._callMediaService("media_play");
   }
 
   async _callMediaService(service, data = {}) {
