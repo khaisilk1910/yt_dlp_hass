@@ -1,0 +1,363 @@
+{
+  "title": "YouTube-DLP",
+  "config": {
+    "abort": {
+      "already_configured": "Already configured. Only one YouTube-DLP configuration is supported."
+    },
+    "error": {
+      "cannot_create_folder": "The download folder cannot be created or is not writable."
+    },
+    "step": {
+      "user": {
+        "title": "YouTube-DLP",
+        "description": "Choose the folder where finished audio/video files will be stored.",
+        "data": {
+          "file_path": "Download folder",
+          "media_library_path": "Music library folder"
+        },
+        "data_description": {
+          "file_path": "Absolute path where completed audio/video files are stored.",
+          "media_library_path": "Folder scanned for local audio playback. Leave empty to use the download folder."
+        }
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "mobile_action_required": "Enable a mobile notification only after selecting a Companion App notification target.",
+      "mobile_action_unavailable": "The selected mobile notification target is no longer registered. Reopen this screen and select an available device.",
+      "zalo_fields_required": "Zalo notifications require both Thread ID and Zalo account.",
+      "cannot_create_folder": "The download folder cannot be created or is not writable.",
+      "target_already_configured": "This playback target is already configured.",
+      "target_unavailable": "This media player is not currently known to Home Assistant."
+    },
+    "step": {
+      "init": {
+        "title": "YouTube-DLP settings",
+        "menu_options": {
+          "settings": "Folders and notifications",
+          "media_targets": "Speakers and TVs"
+        }
+      },
+      "settings": {
+        "title": "Folders and notifications",
+        "description": "Manage download/library folders and notifications. Only folder changes reload the integration.",
+        "sections": {
+          "folders": {
+            "name": "Media folders",
+            "description": "Configure where downloads are stored and which folder the dashboard media library scans.",
+            "data": {
+              "file_path": "Download folder",
+              "media_library_path": "Music library folder"
+            },
+            "data_description": {
+              "file_path": "Absolute writable path where completed audio/video files are stored.",
+              "media_library_path": "Folder scanned for local audio playback. It can be the same as the download folder."
+            }
+          },
+          "notify_home_assistant": {
+            "name": "Home Assistant",
+            "description": "Send a persistent notification in Home Assistant using notify.persistent_notification (with persistent_notification.create as a compatibility fallback).",
+            "data": {
+              "enabled": "Send Home Assistant notification"
+            },
+            "data_description": {
+              "enabled": "Show the completed filename and available file/media details in the Home Assistant notifications panel."
+            }
+          },
+          "notify_mobile": {
+            "name": "Mobile device",
+            "description": "Companion App notification targets are discovered automatically from registered notify.mobile_app_* actions each time this screen is opened.",
+            "data": {
+              "enabled": "Send mobile notification",
+              "mobile_notify_action": "Mobile device"
+            },
+            "data_description": {
+              "enabled": "Send a compact push notification after a successful download.",
+              "mobile_notify_action": "Choose the Companion App device that should receive the notification."
+            }
+          },
+          "notify_zalo": {
+            "name": "Zalo",
+            "description": "Send a message through zalo_bot.send_message. Thread ID is kept as text so large Zalo IDs are preserved exactly.",
+            "data": {
+              "enabled": "Send Zalo notification",
+              "thread_id": "Thread ID",
+              "account_selection": "Zalo account",
+              "type": "Type"
+            },
+            "data_description": {
+              "enabled": "Send a formatted Zalo message after a successful download.",
+              "thread_id": "Target user/group thread ID.",
+              "account_selection": "Zalo account used by the Zalo Bot integration, for example +8437....",
+              "type": "Choose User or Group. User is sent as type 0 and Group as type 1."
+            }
+          }
+        }
+      },
+      "media_targets": {
+        "title": "Speakers and TVs",
+        "description": "Configured targets: {configured_count}\n{configured_targets}",
+        "menu_options": {
+          "add_media_target": "Add target",
+          "edit_media_target": "Rename / classify target",
+          "remove_media_target": "Remove target"
+        }
+      },
+      "add_media_target": {
+        "title": "Add speaker or TV",
+        "description": "Choose a media player already known to Home Assistant.",
+        "data": {
+          "entity_id": "Media player"
+        }
+      },
+      "media_target_details": {
+        "title": "Target name and type",
+        "description": "Entity: {entity_id}. This classification determines the playback method.",
+        "data": {
+          "name": "Display name",
+          "type": "Target type"
+        }
+      },
+      "edit_media_target": {
+        "title": "Edit target",
+        "data": {
+          "entity_id": "Target"
+        }
+      },
+      "remove_media_target": {
+        "title": "Remove target",
+        "data": {
+          "entity_id": "Target"
+        }
+      }
+    },
+    "abort": {
+      "no_media_targets_available": "There are no remaining Home Assistant media players to add."
+    }
+  },
+  "services": {
+    "download_video": {
+      "name": "Download video",
+      "description": "Downloads a video and stores the completed file in the configured folder. Only video options are shown.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Video URL to download."
+        },
+        "video_quality": {
+          "name": "Video quality",
+          "description": "Maximum video height, or best available."
+        },
+        "video_format": {
+          "name": "Video format",
+          "description": "Final video container."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Overwrite an existing output file."
+        },
+        "wait_for_completion": {
+          "name": "Wait for completion",
+          "description": "Wait until download and post-processing finish before the action returns."
+        }
+      }
+    },
+    "download_audio": {
+      "name": "Download audio",
+      "description": "Downloads audio and stores the completed file in the configured folder. Only audio options are shown.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Video or audio URL to download."
+        },
+        "audio_format": {
+          "name": "Audio format",
+          "description": "Final audio format."
+        },
+        "audio_quality": {
+          "name": "Audio quality",
+          "description": "Requested audio bitrate in kbps, or best."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Overwrite an existing output file."
+        },
+        "wait_for_completion": {
+          "name": "Wait for completion",
+          "description": "Wait until download and post-processing finish before the action returns."
+        }
+      }
+    },
+    "download": {
+      "name": "Download media",
+      "description": "Downloads video or audio using one combined action. Video options are expanded initially and audio options are collapsed; both groups remain manually collapsible in Home Assistant.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Media URL to download."
+        },
+        "media_type": {
+          "name": "Media type",
+          "description": "Choose video or audio. Home Assistant does not currently support changing a service section's collapsed state dynamically from this field."
+        },
+        "video_quality": {
+          "name": "Video quality",
+          "description": "Maximum video height, or best available."
+        },
+        "video_format": {
+          "name": "Video format",
+          "description": "Final video container."
+        },
+        "audio_format": {
+          "name": "Audio format",
+          "description": "Final audio format."
+        },
+        "audio_quality": {
+          "name": "Audio quality",
+          "description": "Requested audio bitrate in kbps, or best."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Overwrite an existing output file."
+        },
+        "wait_for_completion": {
+          "name": "Wait for completion",
+          "description": "Wait until download and post-processing finish before the action returns."
+        }
+      },
+      "sections": {
+        "video_options": {
+          "name": "Video options",
+          "description": "Quality and output container used when Media type is Video."
+        },
+        "audio_options": {
+          "name": "Audio options",
+          "description": "Format and bitrate used when Media type is Audio."
+        }
+      }
+    },
+    "get_job": {
+      "name": "Get download job",
+      "description": "Returns the latest retained status and progress snapshot for a background download job.",
+      "fields": {
+        "job_id": {
+          "name": "Job ID",
+          "description": "Job ID returned by a download action."
+        }
+      }
+    },
+    "search": {
+      "name": "Search YouTube",
+      "description": "Searches YouTube and returns metadata for matching videos.",
+      "fields": {
+        "query": {
+          "name": "Search text",
+          "description": "Song, artist, or other YouTube search text."
+        },
+        "limit": {
+          "name": "Result count",
+          "description": "Number of results to return (1-50)."
+        }
+      }
+    },
+    "play": {
+      "name": "Play YouTube on target",
+      "description": "Chooses the playback method from the configured target type: audio for speakers, DLNA-compatible audio for DLNA, and video for TVs.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "YouTube or other yt-dlp-supported HTTP(S) media URL."
+        },
+        "media_player": {
+          "name": "Speaker",
+          "description": "Home Assistant media player that will play the resolved audio stream."
+        }
+      }
+    },
+    "scan_library": {
+      "name": "Scan music library",
+      "description": "Returns supported audio files from the configured music library folder. The scan runs outside the Home Assistant event loop and is cached briefly.",
+      "fields": {
+        "force": {
+          "name": "Force rescan",
+          "description": "Ignore the short library cache and scan the folder again now."
+        }
+      }
+    },
+    "favorites_list": {
+      "name": "List online favorites",
+      "description": "Returns the persistent list of saved online YouTube links used by the bundled dashboard card.",
+      "fields": {}
+    },
+    "favorites_add": {
+      "name": "Add online favorite",
+      "description": "Resolves YouTube metadata once and stores the stable link and display metadata in Home Assistant storage.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "YouTube or other yt-dlp-supported HTTP(S) media URL to save."
+        }
+      }
+    },
+    "favorites_remove": {
+      "name": "Remove online favorite",
+      "description": "Removes one saved online favorite by URL.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Canonical saved URL to remove."
+        }
+      }
+    },
+    "get_media_targets": {
+      "name": "Get playback targets",
+      "description": "Returns the speakers, DLNA renderers and TVs selected in the integration options.",
+      "fields": {}
+    }
+  },
+  "exceptions": {
+    "not_configured": {
+      "message": "YouTube-DLP is not configured or its configuration entry is not loaded."
+    },
+    "download_failed": {
+      "message": "The media download failed: {error}"
+    },
+    "search_failed": {
+      "message": "The YouTube search failed: {error}"
+    },
+    "job_not_found": {
+      "message": "Download job {job_id} was not found or has expired from retained history."
+    },
+    "play_failed": {
+      "message": "Direct media playback failed: {error}"
+    },
+    "library_scan_failed": {
+      "message": "The music library scan failed: {error}"
+    },
+    "favorite_failed": {
+      "message": "Unable to update online favorites: {error}"
+    }
+  },
+  "selector": {
+    "media_type": {
+      "options": {
+        "video": "Video",
+        "audio": "Audio"
+      }
+    },
+    "zalo_type": {
+      "options": {
+        "user": "User",
+        "group": "Group"
+      }
+    },
+    "target_type": {
+      "options": {
+        "speaker": "Regular speaker",
+        "dlna": "DLNA speaker",
+        "tv": "TV"
+      }
+    }
+  }
+}

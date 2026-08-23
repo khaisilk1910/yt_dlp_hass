@@ -1,0 +1,363 @@
+{
+  "title": "YouTube-DLP",
+  "config": {
+    "abort": {
+      "already_configured": "Integration đã được cấu hình. Chỉ hỗ trợ một cấu hình YouTube-DLP."
+    },
+    "error": {
+      "cannot_create_folder": "Không thể tạo thư mục tải xuống hoặc thư mục không có quyền ghi."
+    },
+    "step": {
+      "user": {
+        "title": "YouTube-DLP",
+        "description": "Chọn thư mục lưu các file audio/video đã hoàn tất.",
+        "data": {
+          "file_path": "Thư mục tải xuống",
+          "media_library_path": "Thư mục thư viện nhạc"
+        },
+        "data_description": {
+          "file_path": "Đường dẫn tuyệt đối dùng để lưu file audio/video đã hoàn tất.",
+          "media_library_path": "Thư mục sẽ quét để phát file nhạc cục bộ. Để trống khi cấu hình lần đầu để dùng cùng thư mục tải xuống."
+        }
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "mobile_action_required": "Hãy chọn thiết bị Companion App trước khi bật thông báo lên điện thoại.",
+      "mobile_action_unavailable": "Thiết bị thông báo đã chọn hiện không còn được đăng ký. Hãy mở lại màn hình này và chọn một thiết bị đang khả dụng.",
+      "zalo_fields_required": "Thông báo Zalo cần nhập đủ Thread ID và Zalo account.",
+      "cannot_create_folder": "Không thể tạo thư mục tải xuống hoặc thư mục không có quyền ghi.",
+      "target_already_configured": "Thiết bị này đã được thêm.",
+      "target_unavailable": "Không tìm thấy media player này trong Home Assistant."
+    },
+    "step": {
+      "init": {
+        "title": "Cài đặt YouTube-DLP",
+        "menu_options": {
+          "settings": "Thư mục và thông báo",
+          "media_targets": "Loa và tivi"
+        }
+      },
+      "settings": {
+        "title": "Thư mục và thông báo",
+        "description": "Quản lý thư mục tải xuống/thư viện và thông báo. Chỉ thay đổi thư mục mới reload tích hợp.",
+        "sections": {
+          "folders": {
+            "name": "Thư mục media",
+            "description": "Thiết lập nơi lưu file tải xuống và thư mục mà thư viện nhạc trên dashboard sẽ quét.",
+            "data": {
+              "file_path": "Thư mục tải xuống",
+              "media_library_path": "Thư mục thư viện nhạc"
+            },
+            "data_description": {
+              "file_path": "Đường dẫn tuyệt đối có quyền ghi dùng để lưu file audio/video đã tải xong.",
+              "media_library_path": "Thư mục được quét để phát nhạc cục bộ. Có thể dùng cùng thư mục tải xuống."
+            }
+          },
+          "notify_home_assistant": {
+            "name": "Home Assistant",
+            "description": "Gửi thông báo thường trực trong Home Assistant bằng notify.persistent_notification; tự dùng persistent_notification.create làm phương án tương thích nếu cần.",
+            "data": {
+              "enabled": "Gửi thông báo lên Home Assistant"
+            },
+            "data_description": {
+              "enabled": "Hiển thị tên file đã tải và các thông tin media/file lấy được trong bảng thông báo của Home Assistant."
+            }
+          },
+          "notify_mobile": {
+            "name": "Thiết bị điện thoại",
+            "description": "Mỗi lần mở màn hình này, tích hợp tự quét các action notify.mobile_app_* đã đăng ký bởi Home Assistant Companion App.",
+            "data": {
+              "enabled": "Gửi thông báo lên điện thoại",
+              "mobile_notify_action": "Thiết bị nhận thông báo"
+            },
+            "data_description": {
+              "enabled": "Gửi push notification gọn, dễ đọc sau khi tải thành công.",
+              "mobile_notify_action": "Chọn điện thoại/máy tính bảng Companion App sẽ nhận thông báo."
+            }
+          },
+          "notify_zalo": {
+            "name": "Zalo",
+            "description": "Gửi tin nhắn qua zalo_bot.send_message. Thread ID được giữ dạng chuỗi để không làm thay đổi các ID Zalo có giá trị lớn.",
+            "data": {
+              "enabled": "Gửi thông báo lên Zalo",
+              "thread_id": "Thread ID",
+              "account_selection": "Zalo account",
+              "type": "Type"
+            },
+            "data_description": {
+              "enabled": "Gửi nội dung định dạng đẹp qua Zalo sau khi tải thành công.",
+              "thread_id": "Thread ID của user hoặc group nhận tin.",
+              "account_selection": "Tài khoản Zalo mà tích hợp Zalo Bot sử dụng, ví dụ +8437....",
+              "type": "Chọn User hoặc Group. User được gửi với type 0, Group với type 1."
+            }
+          }
+        }
+      },
+      "media_targets": {
+        "title": "Loa và tivi",
+        "description": "Đã cấu hình {configured_count} thiết bị:\n{configured_targets}",
+        "menu_options": {
+          "add_media_target": "Thêm thiết bị",
+          "edit_media_target": "Đổi tên / phân loại",
+          "remove_media_target": "Xóa thiết bị"
+        }
+      },
+      "add_media_target": {
+        "title": "Thêm loa hoặc tivi",
+        "description": "Chọn media player mà Home Assistant đã có.",
+        "data": {
+          "entity_id": "Thiết bị"
+        }
+      },
+      "media_target_details": {
+        "title": "Tên và loại thiết bị",
+        "description": "Entity: {entity_id}. Phân loại này quyết định phương thức phát.",
+        "data": {
+          "name": "Tên hiển thị",
+          "type": "Loại thiết bị"
+        }
+      },
+      "edit_media_target": {
+        "title": "Sửa thiết bị",
+        "data": {
+          "entity_id": "Thiết bị"
+        }
+      },
+      "remove_media_target": {
+        "title": "Xóa thiết bị",
+        "data": {
+          "entity_id": "Thiết bị"
+        }
+      }
+    },
+    "abort": {
+      "no_media_targets_available": "Không còn media player nào của Home Assistant để thêm."
+    }
+  },
+  "services": {
+    "download_video": {
+      "name": "Tải video",
+      "description": "Tải video và lưu file hoàn tất vào thư mục đã cấu hình. Chỉ hiển thị các tùy chọn video.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "URL video cần tải."
+        },
+        "video_quality": {
+          "name": "Chất lượng video",
+          "description": "Chiều cao video tối đa hoặc chất lượng tốt nhất."
+        },
+        "video_format": {
+          "name": "Định dạng video",
+          "description": "Định dạng file video cuối cùng."
+        },
+        "overwrite": {
+          "name": "Ghi đè",
+          "description": "Ghi đè file đầu ra nếu đã tồn tại."
+        },
+        "wait_for_completion": {
+          "name": "Chờ hoàn tất",
+          "description": "Chờ tải và xử lý hậu kỳ hoàn tất trước khi action trả về."
+        }
+      }
+    },
+    "download_audio": {
+      "name": "Tải âm thanh",
+      "description": "Tải âm thanh và lưu file hoàn tất vào thư mục đã cấu hình. Chỉ hiển thị các tùy chọn âm thanh.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "URL video hoặc âm thanh cần tải."
+        },
+        "audio_format": {
+          "name": "Định dạng âm thanh",
+          "description": "Định dạng file âm thanh cuối cùng."
+        },
+        "audio_quality": {
+          "name": "Chất lượng âm thanh",
+          "description": "Bitrate âm thanh mong muốn theo kbps hoặc tốt nhất."
+        },
+        "overwrite": {
+          "name": "Ghi đè",
+          "description": "Ghi đè file đầu ra nếu đã tồn tại."
+        },
+        "wait_for_completion": {
+          "name": "Chờ hoàn tất",
+          "description": "Chờ tải và xử lý hậu kỳ hoàn tất trước khi action trả về."
+        }
+      }
+    },
+    "download": {
+      "name": "Tải media",
+      "description": "Tải video hoặc âm thanh trong một action gộp. Nhóm tùy chọn Video được mở sẵn và nhóm Audio được thu gọn; cả hai nhóm vẫn có thể mở/thu gọn trực tiếp trong Home Assistant.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "URL media cần tải."
+        },
+        "media_type": {
+          "name": "Loại media",
+          "description": "Chọn Video hoặc Âm thanh. Home Assistant hiện chưa hỗ trợ đổi trạng thái mở/thu gọn của section service theo giá trị field này theo thời gian thực."
+        },
+        "video_quality": {
+          "name": "Chất lượng video",
+          "description": "Chiều cao video tối đa hoặc chất lượng tốt nhất."
+        },
+        "video_format": {
+          "name": "Định dạng video",
+          "description": "Định dạng file video cuối cùng."
+        },
+        "audio_format": {
+          "name": "Định dạng âm thanh",
+          "description": "Định dạng file âm thanh cuối cùng."
+        },
+        "audio_quality": {
+          "name": "Chất lượng âm thanh",
+          "description": "Bitrate âm thanh mong muốn theo kbps hoặc tốt nhất."
+        },
+        "overwrite": {
+          "name": "Ghi đè",
+          "description": "Ghi đè file đầu ra nếu đã tồn tại."
+        },
+        "wait_for_completion": {
+          "name": "Chờ hoàn tất",
+          "description": "Chờ tải và xử lý hậu kỳ hoàn tất trước khi action trả về."
+        }
+      },
+      "sections": {
+        "video_options": {
+          "name": "Tùy chọn video",
+          "description": "Chất lượng và định dạng đầu ra dùng khi Loại media là Video."
+        },
+        "audio_options": {
+          "name": "Tùy chọn âm thanh",
+          "description": "Định dạng và bitrate dùng khi Loại media là Âm thanh."
+        }
+      }
+    },
+    "get_job": {
+      "name": "Lấy trạng thái job tải",
+      "description": "Trả về trạng thái và tiến trình mới nhất của một job tải nền còn được lưu trong lịch sử.",
+      "fields": {
+        "job_id": {
+          "name": "Job ID",
+          "description": "Job ID do action tải trả về."
+        }
+      }
+    },
+    "search": {
+      "name": "Tìm kiếm YouTube",
+      "description": "Tìm kiếm YouTube và trả về metadata của các video phù hợp.",
+      "fields": {
+        "query": {
+          "name": "Nội dung tìm kiếm",
+          "description": "Tên bài hát, ca sĩ hoặc nội dung cần tìm trên YouTube."
+        },
+        "limit": {
+          "name": "Số kết quả",
+          "description": "Số kết quả trả về (1-50)."
+        }
+      }
+    },
+    "play": {
+      "name": "Phát YouTube lên thiết bị",
+      "description": "Tự chọn phương thức phát theo loại thiết bị đã cấu hình: audio cho loa, MP3 tương thích cho DLNA, video cho tivi.",
+      "fields": {
+        "url": {
+          "name": "Link",
+          "description": "Link YouTube hoặc URL HTTP(S) được yt-dlp hỗ trợ."
+        },
+        "media_player": {
+          "name": "Loa",
+          "description": "Media player của Home Assistant sẽ phát luồng âm thanh."
+        }
+      }
+    },
+    "scan_library": {
+      "name": "Quét thư viện nhạc",
+      "description": "Trả về các file âm thanh được hỗ trợ trong thư mục thư viện đã cấu hình. Quá trình quét chạy ngoài event loop và có cache ngắn.",
+      "fields": {
+        "force": {
+          "name": "Buộc quét lại",
+          "description": "Bỏ qua cache thư viện ngắn và quét lại thư mục ngay."
+        }
+      }
+    },
+    "favorites_list": {
+      "name": "Danh sách yêu thích online",
+      "description": "Trả về danh sách link YouTube yêu thích được lưu bền vững cho thẻ dashboard.",
+      "fields": {}
+    },
+    "favorites_add": {
+      "name": "Thêm yêu thích online",
+      "description": "Lấy metadata YouTube một lần rồi lưu link và thông tin hiển thị ổn định vào bộ nhớ Home Assistant.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "Link YouTube hoặc HTTP(S) được yt-dlp hỗ trợ cần lưu."
+        }
+      }
+    },
+    "favorites_remove": {
+      "name": "Xóa yêu thích online",
+      "description": "Xóa một bài online yêu thích theo URL đã lưu.",
+      "fields": {
+        "url": {
+          "name": "URL",
+          "description": "URL chuẩn của bài đã lưu cần xóa."
+        }
+      }
+    },
+    "get_media_targets": {
+      "name": "Lấy danh sách thiết bị phát",
+      "description": "Trả về các loa/DLNA/tivi mà người dùng đã thêm trong cấu hình tích hợp.",
+      "fields": {}
+    }
+  },
+  "exceptions": {
+    "not_configured": {
+      "message": "YouTube-DLP chưa được cấu hình hoặc config entry chưa được nạp."
+    },
+    "download_failed": {
+      "message": "Tải media thất bại: {error}"
+    },
+    "search_failed": {
+      "message": "Tìm kiếm YouTube thất bại: {error}"
+    },
+    "job_not_found": {
+      "message": "Không tìm thấy job tải {job_id} hoặc job đã hết thời gian lưu trong lịch sử."
+    },
+    "play_failed": {
+      "message": "Phát media trực tiếp thất bại: {error}"
+    },
+    "library_scan_failed": {
+      "message": "Quét thư viện nhạc thất bại: {error}"
+    },
+    "favorite_failed": {
+      "message": "Không thể cập nhật danh sách yêu thích online: {error}"
+    }
+  },
+  "selector": {
+    "media_type": {
+      "options": {
+        "video": "Video",
+        "audio": "Âm thanh"
+      }
+    },
+    "zalo_type": {
+      "options": {
+        "user": "User",
+        "group": "Group"
+      }
+    },
+    "target_type": {
+      "options": {
+        "speaker": "Loa thường",
+        "dlna": "Loa DLNA",
+        "tv": "Tivi"
+      }
+    }
+  }
+}
