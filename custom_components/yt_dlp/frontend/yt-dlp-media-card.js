@@ -181,11 +181,13 @@ class YtDlpMediaCard extends HTMLElement {
 
     if (this._managedTargetsLoaded) {
       const allowed = new Set(this._configuredPlayers());
-      this._selectedPlayers = this._selectedPlayers.filter((entityId) => allowed.has(entityId) && this._targetAvailable(entityId));
+      this._selectedPlayers = this._selectedPlayers.filter((entityId) => allowed.has(entityId));
       if (!this._selectedPlayers.length) {
-        const candidates = players.map((player) => player.entity_id).filter((entityId) => this._targetAvailable(entityId));
+        const candidates = players.map((player) => player.entity_id);
         const active = candidates.find((entityId) => ["playing", "paused", "buffering"].includes(hass.states[entityId]?.state));
-        this._selectedPlayers = active ? [active] : (candidates[0] ? [candidates[0]] : []);
+        const available = candidates.find((entityId) => this._targetAvailable(entityId));
+        const preferred = active || available || candidates[0] || "";
+        this._selectedPlayers = preferred ? [preferred] : [];
       }
       this._selectedPlayer = this._selectedPlayers[0] || "";
       if (this._selectedPlayers.length && (!this._speakerSelectionRestored || previousSelection !== this._selectedPlayers.join("|"))) {
@@ -282,14 +284,14 @@ class YtDlpMediaCard extends HTMLElement {
     if (!this._hass || !this._managedTargetsLoaded) return [];
     const allowed = new Set(this._configuredPlayers());
     return [...new Set(this._selectedPlayers)]
-      .filter((entityId) => allowed.has(entityId) && this._targetAvailable(entityId));
+      .filter((entityId) => allowed.has(entityId));
   }
 
   _setSelectedPlayers(entityIds) {
     const previousPrimary = this._selectedPlayer;
     let valid = [...new Set(entityIds)]
-      .filter((entityId) => typeof entityId === "string" && this._configuredPlayers().includes(entityId) && this._targetAvailable(entityId));
-    if (!valid.length && this._selectedPlayer && this._hass?.states?.[this._selectedPlayer]) {
+      .filter((entityId) => typeof entityId === "string" && this._configuredPlayers().includes(entityId));
+    if (!valid.length && this._selectedPlayer && this._configuredPlayers().includes(this._selectedPlayer)) {
       valid = [this._selectedPlayer];
     }
     if (this._selectedPlayer && valid.includes(this._selectedPlayer)) {
@@ -479,8 +481,8 @@ class YtDlpMediaCard extends HTMLElement {
   _speakerSummary() {
     const selected = this._targetPlayers();
     if (!selected.length) return this._managedTargetsLoaded ? "Chọn thiết bị" : "Đang tải thiết bị…";
-    if (selected.length === 1) return this._friendlyName(this._hass?.states?.[selected[0]]);
-    return `${this._friendlyName(this._hass?.states?.[selected[0]])} + ${selected.length - 1} thiết bị`;
+    if (selected.length === 1) return this._friendlyNameForEntity(selected[0]);
+    return `${this._friendlyNameForEntity(selected[0])} + ${selected.length - 1} thiết bị`;
   }
 
   _playerSignature(hass) {
@@ -492,8 +494,13 @@ class YtDlpMediaCard extends HTMLElement {
   }
 
   _friendlyName(state) {
-    const target = this._managedTarget(state?.entity_id);
-    return target?.name || state?.attributes?.friendly_name || state?.entity_id || "Media player";
+    return this._friendlyNameForEntity(state?.entity_id, state);
+  }
+
+  _friendlyNameForEntity(entityId, state = undefined) {
+    const target = this._managedTarget(entityId);
+    const current = state || this._hass?.states?.[entityId];
+    return target?.name || current?.attributes?.friendly_name || entityId || "Media player";
   }
 
   _targetTypeLabel(entityId) {
@@ -637,7 +644,7 @@ class YtDlpMediaCard extends HTMLElement {
             <div class="speaker-options">
               ${players.length ? players.map((player) => `
                 <label class="speaker-option">
-                  <input type="checkbox" data-speaker-id="${this._escape(player.entity_id)}" ${this._selectedPlayers.includes(player.entity_id) ? "checked" : ""} ${this._targetAvailable(player.entity_id) ? "" : "disabled"}>
+                  <input type="checkbox" data-speaker-id="${this._escape(player.entity_id)}" ${this._selectedPlayers.includes(player.entity_id) ? "checked" : ""}>
                   <span class="speaker-check">${this._icon("check")}</span>
                   <span class="speaker-name">${this._escape(this._friendlyName(player))} <small>${this._escape(this._targetTypeLabel(player.entity_id))}</small></span>
                 </label>`).join("") : `<div class="speaker-empty">${this._managedTargetsLoaded ? "Chưa có thiết bị. Hãy thêm loa/tivi trong cấu hình tích hợp YouTube-DLP." : "Đang tải danh sách thiết bị…"}</div>`}
@@ -1419,11 +1426,13 @@ class YtDlpMediaCard extends HTMLElement {
       this._managedTargetsRetryAt = 0;
 
       const allowed = new Set(this._configuredPlayers());
-      this._selectedPlayers = this._selectedPlayers.filter((entityId) => allowed.has(entityId) && this._targetAvailable(entityId));
+      this._selectedPlayers = this._selectedPlayers.filter((entityId) => allowed.has(entityId));
       if (!this._selectedPlayers.length) {
-        const candidates = this._managedTargets.map((target) => target.entity_id).filter((entityId) => this._targetAvailable(entityId));
+        const candidates = this._managedTargets.map((target) => target.entity_id);
         const active = candidates.find((entityId) => ["playing", "paused", "buffering"].includes(this._hass.states[entityId]?.state));
-        this._selectedPlayers = active ? [active] : (candidates[0] ? [candidates[0]] : []);
+        const available = candidates.find((entityId) => this._targetAvailable(entityId));
+        const preferred = active || available || candidates[0] || "";
+        this._selectedPlayers = preferred ? [preferred] : [];
       }
       this._selectedPlayer = this._selectedPlayers[0] || "";
       this._persistSpeakerSelection();
