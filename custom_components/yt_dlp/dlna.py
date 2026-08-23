@@ -1,10 +1,9 @@
-"""DLNA-specific compatibility playback for YouTube-DLP.
+"""Optional DLNA compatibility layer for YouTube-DLP playback.
 
-Home Assistant's DLNA DMR integration resolves media-source URIs to HTTP URLs,
-probes those URLs, builds DIDL-Lite metadata, then asks the renderer to fetch the
-media itself.  Many audio renderers advertise a much narrower set of accepted
-containers/codecs than Cast devices.  This module prepares a stable MP3 file for
-DLNA targets while leaving the normal Cast/media_player path unchanged.
+This module is deliberately isolated from the protected download/playback core.
+It materializes a complete MP3 for DLNA DMR targets and serves that file with
+DLNA-friendly HTTP headers so Home Assistant/async_upnp_client can build stable
+DIDL-Lite protocolInfo metadata.
 """
 
 from __future__ import annotations
@@ -32,10 +31,11 @@ _LOGGER = logging.getLogger(__name__)
 
 DLNA_MEDIA_URL_PREFIX = "/api/yt_dlp/dlna"
 DLNA_MIME_TYPE = "audio/mpeg"
+DLNA_CONTENT_FEATURES = "DLNA.ORG_PN=MP3;DLNA.ORG_OP=01;DLNA.ORG_CI=0"
 _DLNA_CACHE_TTL_SECONDS = 8 * 60 * 60
 _MAX_DLNA_CACHE_ITEMS = 24
-_REMOTE_TIMEOUT = ClientTimeout(total=None, connect=20, sock_connect=20, sock_read=60)
-_UPSTREAM_RETRY_STATUSES = frozenset({401, 403, 404, 410, 416, 429})
+_REMOTE_TIMEOUT = ClientTimeout(total=None, connect=20, sock_connect=20, sock_read=90)
+_RETRYABLE_UPSTREAM_STATUSES = frozenset({401, 403, 404, 410, 416, 429})
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -54,7 +54,7 @@ _HOP_BY_HOP_HEADERS = frozenset(
 
 @dataclass(slots=True)
 class DlnaCacheItem:
-    """One transcoded DLNA-compatible cache file."""
+    """One complete DLNA-compatible cache file."""
 
     token: str
     source_key: str
@@ -64,7 +64,7 @@ class DlnaCacheItem:
 
 
 class DlnaPlaybackManager:
-    """Prepare complete MP3 files for strict DLNA renderers."""
+    """Prepare and cache complete MP3 files for strict DLNA renderers."""
 
     def __init__(self, hass: HomeAssistant, ffmpeg_hint: str | None) -> None:
         self.hass = hass
@@ -80,7 +80,7 @@ class DlnaPlaybackManager:
     async def async_prepare_remote(
         self, playback: PlaybackManager, stream_token: str
     ) -> str:
-        """Transcode one live yt-dlp stream session to a stable MP3 file."""
+        """Materialize one remote playback session as a complete MP3."""
         session = playback.get_stream_session(stream_token)
         if session is None:
             raise RuntimeError("Playback stream has expired")
@@ -96,26 +96,32 @@ class DlnaPlaybackManager:
             final_path = self._cache_dir / f"{token}.mp3"
             temp_path = self._cache_dir / f".{token}.part.mp3"
             try:
-                await self._async_transcode_remote(
-                    playback, stream_token, temp_path
-                )
+                await self._async_transcode_remote(playback, stream_token, temp_path)
                 await self.hass.async_add_executor_job(
                     _replace_file, temp_path, final_path
                 )
+            except asyncio.CancelledError:
+                await self.hass.async_add_executor_job(_safe_unlink, temp_path)
+                raise
             except Exception:
                 await self.hass.async_add_executor_job(_safe_unlink, temp_path)
                 raise
+
+            size = await self.hass.async_add_executor_job(_valid_media_size, final_path)
+            if size <= 0:
+                await self.hass.async_add_executor_job(_safe_unlink, final_path)
+                raise RuntimeError("DLNA transcode produced an empty MP3")
 
             now = time.monotonic()
             item = DlnaCacheItem(token, source_key, final_path, now, now)
             self._items_by_source[source_key] = item
             self._items_by_token[token] = item
             await self._async_prune_locked()
-            _LOGGER.debug("Prepared DLNA MP3 cache for remote source: %s", source_key)
+            _LOGGER.info("Prepared DLNA MP3 cache (%d bytes)", size)
             return self._url_for(token)
 
     async def async_prepare_local(self, path: Path) -> str:
-        """Transcode a local library file to a stable DLNA-compatible MP3."""
+        """Materialize one local library item as a DLNA-compatible MP3."""
         stat = await self.hass.async_add_executor_job(path.stat)
         source_key = f"local:{path}:{stat.st_mtime_ns}:{stat.st_size}"
 
@@ -129,21 +135,33 @@ class DlnaPlaybackManager:
             final_path = self._cache_dir / f"{token}.mp3"
             temp_path = self._cache_dir / f".{token}.part.mp3"
             try:
-                ffmpeg = await self._async_resolve_ffmpeg()
-                await self._run_ffmpeg_file(ffmpeg, path, temp_path)
+                if path.suffix.lower() == ".mp3":
+                    await self.hass.async_add_executor_job(
+                        _copy_file, path, temp_path
+                    )
+                else:
+                    ffmpeg = await self._async_resolve_ffmpeg()
+                    await self._run_ffmpeg_file(ffmpeg, path, temp_path)
                 await self.hass.async_add_executor_job(
                     _replace_file, temp_path, final_path
                 )
+            except asyncio.CancelledError:
+                await self.hass.async_add_executor_job(_safe_unlink, temp_path)
+                raise
             except Exception:
                 await self.hass.async_add_executor_job(_safe_unlink, temp_path)
                 raise
+
+            size = await self.hass.async_add_executor_job(_valid_media_size, final_path)
+            if size <= 0:
+                await self.hass.async_add_executor_job(_safe_unlink, final_path)
+                raise RuntimeError("DLNA transcode produced an empty MP3")
 
             now = time.monotonic()
             item = DlnaCacheItem(token, source_key, final_path, now, now)
             self._items_by_source[source_key] = item
             self._items_by_token[token] = item
             await self._async_prune_locked()
-            _LOGGER.debug("Prepared DLNA MP3 cache for local source: %s", path)
             return self._url_for(token)
 
     def get_file(self, token: str) -> Path | None:
@@ -153,11 +171,13 @@ class DlnaPlaybackManager:
             return None
         if time.monotonic() - item.last_access > _DLNA_CACHE_TTL_SECONDS:
             return None
+        if not item.path.is_file():
+            return None
         item.last_access = time.monotonic()
         return item.path
 
     async def async_shutdown(self) -> None:
-        """Drop in-memory cache state and remove temporary transcodes."""
+        """Drop cache state and remove temporary transcodes."""
         async with self._lock:
             self._items_by_source.clear()
             self._items_by_token.clear()
@@ -169,16 +189,14 @@ class DlnaPlaybackManager:
     ) -> None:
         ffmpeg = await self._async_resolve_ffmpeg()
         last_error: Exception | None = None
+
+        # Keep fallbacks bounded. The normal playback resolver already rotates
+        # extractor routes; DLNA only needs a small number of fresh attempts.
         attempts: tuple[tuple[bool | None, tuple[str, ...] | None], ...] = (
             (None, None),
             (False, None),
-            (True, None),
-            (False, ("android_vr",)),
             (True, ("android_vr",)),
-            (False, ("web_embedded",)),
             (True, ("web_embedded",)),
-            (False, ("web_safari",)),
-            (True, ("web_safari",)),
         )
 
         for advance_route, player_clients in attempts:
@@ -191,7 +209,7 @@ class DlnaPlaybackManager:
                         advance_route=advance_route,
                         player_clients=player_clients,
                     )
-                except Exception as err:  # noqa: BLE001 - bounded compatibility fallbacks
+                except Exception as err:  # noqa: BLE001 - bounded fallback path
                     last_error = err
                     continue
             if session is None:
@@ -200,7 +218,9 @@ class DlnaPlaybackManager:
             try:
                 await self._run_ffmpeg_remote(ffmpeg, session, output_path)
                 return
-            except Exception as err:  # noqa: BLE001 - try next safe upstream route
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - try next safe source route
                 last_error = err
                 await self.hass.async_add_executor_job(_safe_unlink, output_path)
 
@@ -262,7 +282,7 @@ class DlnaPlaybackManager:
                 timeout=_REMOTE_TIMEOUT,
                 auto_decompress=False,
             )
-            if response.status in _UPSTREAM_RETRY_STATUSES:
+            if response.status in _RETRYABLE_UPSTREAM_STATUSES:
                 raise RuntimeError(
                     f"upstream media rejected DLNA transcode with HTTP {response.status}"
                 )
@@ -277,10 +297,14 @@ class DlnaPlaybackManager:
             process.stdin.close()
             await process.stdin.wait_closed()
 
-            stderr = (await process.stderr.read()).decode("utf-8", errors="replace").strip()
+            stderr = (
+                await process.stderr.read()
+            ).decode("utf-8", errors="replace").strip()
             return_code = await process.wait()
             if return_code != 0:
                 raise RuntimeError(stderr or f"ffmpeg exited with status {return_code}")
+        except asyncio.CancelledError:
+            raise
         except (ClientError, TimeoutError, OSError, BrokenPipeError, ConnectionResetError) as err:
             raise RuntimeError(f"DLNA transcode input failed: {err}") from err
         finally:
@@ -325,10 +349,16 @@ class DlnaPlaybackManager:
             stderr=asyncio.subprocess.PIPE,
         )
         assert process.stderr is not None
-        stderr = (await process.stderr.read()).decode("utf-8", errors="replace").strip()
-        return_code = await process.wait()
-        if return_code != 0:
-            raise RuntimeError(stderr or f"ffmpeg exited with status {return_code}")
+        try:
+            stderr = (
+                await process.stderr.read()
+            ).decode("utf-8", errors="replace").strip()
+            return_code = await process.wait()
+            if return_code != 0:
+                raise RuntimeError(stderr or f"ffmpeg exited with status {return_code}")
+        finally:
+            if process.returncode is None:
+                await _async_terminate_process(process)
 
     async def _async_resolve_ffmpeg(self) -> str:
         if self._ffmpeg_binary:
@@ -348,7 +378,7 @@ class DlnaPlaybackManager:
 
     def _get_cached_locked(self, source_key: str) -> DlnaCacheItem | None:
         item = self._items_by_source.get(source_key)
-        if item is None:
+        if item is None or not item.path.is_file():
             return None
         item.last_access = time.monotonic()
         return item
@@ -358,7 +388,7 @@ class DlnaPlaybackManager:
         expired = [
             item
             for item in self._items_by_token.values()
-            if now - item.last_access > _DLNA_CACHE_TTL_SECONDS
+            if now - item.last_access > _DLNA_CACHE_TTL_SECONDS or not item.path.is_file()
         ]
         remaining = len(self._items_by_token) - len(expired)
         if remaining > _MAX_DLNA_CACHE_ITEMS:
@@ -394,13 +424,11 @@ class DlnaPlaybackManager:
 
     @staticmethod
     def _url_for(token: str) -> str:
-        # No query string: Home Assistant's DLNA integration will convert this
-        # relative URL to an absolute LAN URL and attach authSig for this view.
         return f"{DLNA_MEDIA_URL_PREFIX}/{token}.mp3"
 
 
 class YoutubeDlpDlnaView(HomeAssistantView):
-    """Serve complete transcoded MP3s with normal aiohttp range semantics."""
+    """Serve complete MP3s with range support and DLNA protocol headers."""
 
     url = f"{DLNA_MEDIA_URL_PREFIX}/{{token}}.mp3"
     name = "api:yt_dlp:dlna"
@@ -415,15 +443,25 @@ class YoutubeDlpDlnaView(HomeAssistantView):
             raise web.HTTPNotFound(text="DLNA playback cache has expired")
         return path
 
+    @staticmethod
+    def _headers() -> dict[str, str]:
+        return {
+            "Cache-Control": "no-store",
+            "Content-Type": DLNA_MIME_TYPE,
+            "Accept-Ranges": "bytes",
+            "ContentFeatures.dlna.org": DLNA_CONTENT_FEATURES,
+            "transferMode.dlna.org": "Streaming",
+        }
+
     async def head(self, request: web.Request, token: str) -> web.FileResponse:
         hass: HomeAssistant = request.app[KEY_HASS]
         path = await self._path(hass, token)
-        return web.FileResponse(path, headers={"Cache-Control": "no-store"})
+        return web.FileResponse(path, headers=self._headers())
 
     async def get(self, request: web.Request, token: str) -> web.FileResponse:
         hass: HomeAssistant = request.app[KEY_HASS]
         path = await self._path(hass, token)
-        return web.FileResponse(path, headers={"Cache-Control": "no-store"})
+        return web.FileResponse(path, headers=self._headers())
 
 
 async def _async_terminate_process(process: asyncio.subprocess.Process) -> None:
@@ -442,9 +480,22 @@ async def _async_terminate_process(process: asyncio.subprocess.Process) -> None:
 
 def _resolve_ffmpeg_binary(hint: str) -> str | None:
     """Resolve HA's ffmpeg hint to an executable path off the event loop."""
-    if Path(hint).is_file():
-        return str(Path(hint).resolve())
+    candidate = Path(hint)
+    if candidate.is_file():
+        return str(candidate.resolve())
     return shutil.which(hint) or shutil.which("ffmpeg")
+
+
+def _valid_media_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _copy_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
 
 
 def _replace_file(source: Path, destination: Path) -> None:

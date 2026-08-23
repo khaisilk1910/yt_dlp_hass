@@ -26,7 +26,6 @@ from .const import (
 )
 from .download_runtime import get_loaded_manager
 from .download_services import async_register_download_services
-from .dlna import DlnaPlaybackManager, YoutubeDlpDlnaView
 from .helpers import normalize_download_directory
 from .manager import YoutubeDlpManager
 from .media_http import YoutubeDlpMediaView, YoutubeDlpStreamView
@@ -58,11 +57,21 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register protected core services first, optional features second."""
     hass.http.register_view(YoutubeDlpMediaView())
     hass.http.register_view(YoutubeDlpStreamView())
-    hass.http.register_view(YoutubeDlpDlnaView())
 
     # Critical boundaries: if these fail, the integration should fail loudly.
     async_register_download_services(hass)
     async_register_play_services(hass)
+
+    # DLNA is additive. Never allow an HTTP-view/API compatibility issue to
+    # take down the protected play/download services.
+    try:
+        from .dlna import YoutubeDlpDlnaView
+
+        hass.http.register_view(YoutubeDlpDlnaView())
+    except Exception:  # noqa: BLE001 - optional compatibility layer isolation
+        _LOGGER.exception(
+            "DLNA compatibility HTTP endpoint failed to register; core remains available"
+        )
 
     # Favorites is additive. An error here is isolated and cannot unregister or
     # wrap the already-registered download/direct-play services.
@@ -91,10 +100,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_MEDIA_LIBRARY_PATH, download_path)
     )
     manager.playback_manager = PlaybackManager(hass, entry, library_path)
-    manager.dlna_manager = DlnaPlaybackManager(hass, ffmpeg_path)
     manager.playback_manager.async_start_resume_monitoring()
     entry.runtime_data = manager
     manager.async_publish_state()
+
+    # Optional DLNA runtime is initialized only after the protected core is fully
+    # published. Failure here must never affect download/direct playback.
+    try:
+        from .dlna import DlnaPlaybackManager
+
+        manager.dlna_manager = DlnaPlaybackManager(hass, ffmpeg_path)
+    except Exception:  # noqa: BLE001 - optional compatibility layer isolation
+        _LOGGER.exception(
+            "DLNA compatibility runtime failed to initialize; core remains available"
+        )
 
     # Favorites is optional/additive and storage load is background-only.
     try:
@@ -154,9 +173,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         playback = getattr(manager, "playback_manager", None)
         if isinstance(playback, PlaybackManager):
             playback.async_stop_resume_monitoring()
+
         dlna_manager = getattr(manager, "dlna_manager", None)
-        if isinstance(dlna_manager, DlnaPlaybackManager):
-            await dlna_manager.async_shutdown()
+        if dlna_manager is not None:
+            try:
+                shutdown = getattr(dlna_manager, "async_shutdown", None)
+                if callable(shutdown):
+                    await shutdown()
+            except Exception:  # noqa: BLE001 - unload core even if DLNA cleanup fails
+                _LOGGER.exception("DLNA compatibility cleanup failed during unload")
         await manager.async_shutdown()
 
     hass.states.async_remove(STATE_DOWNLOADER)

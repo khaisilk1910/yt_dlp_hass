@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 from urllib.parse import quote, unquote
@@ -25,14 +26,15 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import DOMAIN
+_LOGGER = logging.getLogger(__name__)
+_DLNA_PREPARE_TIMEOUT_SECONDS = 75
+
 from .playback import (
     MEDIA_URL_PREFIX,
     STREAM_MEDIA_SOURCE_PREFIX,
     STREAM_URL_PREFIX,
     _mime_from_suffix,
 )
-
-_LOGGER = logging.getLogger(__name__)
 
 
 async def async_get_media_source(hass: HomeAssistant) -> MediaSource:
@@ -64,20 +66,19 @@ class YoutubeDlpMediaSource(MediaSource):
             if stream_session is None:
                 raise Unresolvable("Playback stream has expired")
 
-            # DLNA DMR renderers fetch the media URL themselves and often accept
-            # a narrower codec/container set than Cast. Prepare a complete MP3
-            # for those targets so Home Assistant can probe it, build DIDL-Lite
-            # metadata with audio/mpeg, and serve normal byte ranges. If ffmpeg
-            # preparation fails, preserve the existing direct relay as fallback.
+            # DLNA is an optional compatibility path. Build a complete MP3 with
+            # byte ranges + DLNA headers when possible, but never let DLNA
+            # preparation failure take down the original direct playback path.
             if _is_dlna_target(self.hass, item.target_media_player):
                 try:
                     from .dlna_runtime import get_dlna_manager
 
                     dlna = get_dlna_manager(self.hass)
-                    dlna_path = await dlna.async_prepare_remote(manager, token)
-                except Exception as err:  # noqa: BLE001 - compatibility fallback
+                    async with asyncio.timeout(_DLNA_PREPARE_TIMEOUT_SECONDS):
+                        dlna_path = await dlna.async_prepare_remote(manager, token)
+                except Exception as err:  # noqa: BLE001 - direct relay fallback is intentional
                     _LOGGER.warning(
-                        "Unable to prepare DLNA-compatible MP3; using direct relay: %s",
+                        "DLNA MP3 preparation failed; falling back to original stream: %s",
                         err,
                     )
                 else:
@@ -120,19 +121,16 @@ class YoutubeDlpMediaSource(MediaSource):
             raise Unresolvable("Media file does not exist")
 
         mime = mimetypes.guess_type(path.name)[0] or _mime_from_suffix(path.suffix)
-        if (
-            _is_dlna_target(self.hass, item.target_media_player)
-            and path.suffix.lower() != ".mp3"
-        ):
+        if _is_dlna_target(self.hass, item.target_media_player):
             try:
                 from .dlna_runtime import get_dlna_manager
 
                 dlna = get_dlna_manager(self.hass)
-                dlna_path = await dlna.async_prepare_local(path)
-            except Exception as err:  # noqa: BLE001 - preserve original file fallback
+                async with asyncio.timeout(_DLNA_PREPARE_TIMEOUT_SECONDS):
+                    dlna_path = await dlna.async_prepare_local(path)
+            except Exception as err:  # noqa: BLE001 - original-file fallback is intentional
                 _LOGGER.warning(
-                    "Unable to transcode local file for DLNA; using original media: %s",
-                    err,
+                    "DLNA local-file conversion failed; using original media: %s", err
                 )
             else:
                 return PlayMedia(dlna_path, "audio/mpeg")

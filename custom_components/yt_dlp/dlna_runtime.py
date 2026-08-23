@@ -1,17 +1,23 @@
-"""Runtime lookup for DLNA compatibility playback."""
+"""Runtime lookup for the optional DLNA compatibility manager."""
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 
 from .const import DOMAIN
-from .dlna import DlnaPlaybackManager
+
+if TYPE_CHECKING:
+    from .dlna import DlnaPlaybackManager
 
 
 def get_dlna_manager(hass: HomeAssistant) -> DlnaPlaybackManager:
-    """Return the loaded DLNA compatibility manager."""
+    """Return the loaded optional DLNA manager without touching core services."""
+    from .dlna import DlnaPlaybackManager
+
     for entry in hass.config_entries.async_entries(DOMAIN):
         if entry.state is not ConfigEntryState.LOADED:
             continue
