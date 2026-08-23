@@ -20,5 +20,5 @@
     "nodejs-wheel-binaries==24.19.0"
   ],
   "single_config_entry": true,
-  "version": "0.5.20"
+  "version": "0.5.21"
 }

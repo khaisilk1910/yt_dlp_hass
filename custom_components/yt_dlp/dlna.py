@@ -31,7 +31,10 @@ _LOGGER = logging.getLogger(__name__)
 
 DLNA_MEDIA_URL_PREFIX = "/api/yt_dlp/dlna"
 DLNA_MIME_TYPE = "audio/mpeg"
-DLNA_CONTENT_FEATURES = "DLNA.ORG_PN=MP3;DLNA.ORG_OP=01;DLNA.ORG_CI=0"
+DLNA_CONTENT_FEATURES = (
+    "DLNA.ORG_PN=MP3;DLNA.ORG_OP=01;DLNA.ORG_CI=0;"
+    "DLNA.ORG_FLAGS=01D00000000000000000000000000000"
+)
 _DLNA_CACHE_TTL_SECONDS = 8 * 60 * 60
 _MAX_DLNA_CACHE_ITEMS = 24
 _REMOTE_TIMEOUT = ClientTimeout(total=None, connect=20, sock_connect=20, sock_read=90)
@@ -424,7 +427,11 @@ class DlnaPlaybackManager:
 
     @staticmethod
     def _url_for(token: str) -> str:
-        return f"{DLNA_MEDIA_URL_PREFIX}/{token}.mp3"
+        # The query string is intentional. Home Assistant's
+        # async_process_play_media_url does not append a long authSig when a
+        # query is already present. The random token is the short-lived
+        # capability secret for this otherwise unauthenticated DLNA endpoint.
+        return f"{DLNA_MEDIA_URL_PREFIX}/{token}.mp3?dlna=1"
 
 
 class YoutubeDlpDlnaView(HomeAssistantView):
@@ -432,7 +439,11 @@ class YoutubeDlpDlnaView(HomeAssistantView):
 
     url = f"{DLNA_MEDIA_URL_PREFIX}/{{token}}.mp3"
     name = "api:yt_dlp:dlna"
-    requires_auth = True
+    # DLNA renderers cannot send HA authentication headers. The URL contains a
+    # high-entropy, short-lived capability token and cannot be enumerated.
+    # Keeping this view unauthenticated also avoids authSig URLs that exceed
+    # limits on a number of embedded DLNA renderers.
+    requires_auth = False
 
     async def _path(self, hass: HomeAssistant, token: str) -> Path:
         from .dlna_runtime import get_dlna_manager
@@ -451,6 +462,7 @@ class YoutubeDlpDlnaView(HomeAssistantView):
             "Accept-Ranges": "bytes",
             "ContentFeatures.dlna.org": DLNA_CONTENT_FEATURES,
             "transferMode.dlna.org": "Streaming",
+            "Content-Disposition": 'inline; filename="stream.mp3"',
         }
 
     async def head(self, request: web.Request, token: str) -> web.FileResponse:
