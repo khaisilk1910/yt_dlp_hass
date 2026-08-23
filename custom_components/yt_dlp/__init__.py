@@ -26,6 +26,7 @@ from .const import (
 )
 from .download_runtime import get_loaded_manager
 from .download_services import async_register_download_services
+from .dlna import DlnaPlaybackManager, YoutubeDlpDlnaView
 from .helpers import normalize_download_directory
 from .manager import YoutubeDlpManager
 from .media_http import YoutubeDlpMediaView, YoutubeDlpStreamView
@@ -57,6 +58,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register protected core services first, optional features second."""
     hass.http.register_view(YoutubeDlpMediaView())
     hass.http.register_view(YoutubeDlpStreamView())
+    hass.http.register_view(YoutubeDlpDlnaView())
 
     # Critical boundaries: if these fail, the integration should fail loudly.
     async_register_download_services(hass)
@@ -89,6 +91,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_MEDIA_LIBRARY_PATH, download_path)
     )
     manager.playback_manager = PlaybackManager(hass, entry, library_path)
+    manager.dlna_manager = DlnaPlaybackManager(hass, ffmpeg_path)
     manager.playback_manager.async_start_resume_monitoring()
     entry.runtime_data = manager
     manager.async_publish_state()
@@ -151,6 +154,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         playback = getattr(manager, "playback_manager", None)
         if isinstance(playback, PlaybackManager):
             playback.async_stop_resume_monitoring()
+        dlna_manager = getattr(manager, "dlna_manager", None)
+        if isinstance(dlna_manager, DlnaPlaybackManager):
+            await dlna_manager.async_shutdown()
         await manager.async_shutdown()
 
     hass.states.async_remove(STATE_DOWNLOADER)

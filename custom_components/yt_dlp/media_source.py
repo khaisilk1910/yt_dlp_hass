@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 from urllib.parse import quote, unquote
 
@@ -30,6 +31,8 @@ from .playback import (
     STREAM_URL_PREFIX,
     _mime_from_suffix,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_get_media_source(hass: HomeAssistant) -> MediaSource:
@@ -60,6 +63,25 @@ class YoutubeDlpMediaSource(MediaSource):
             stream_session = manager.get_stream_session(token)
             if stream_session is None:
                 raise Unresolvable("Playback stream has expired")
+
+            # DLNA DMR renderers fetch the media URL themselves and often accept
+            # a narrower codec/container set than Cast. Prepare a complete MP3
+            # for those targets so Home Assistant can probe it, build DIDL-Lite
+            # metadata with audio/mpeg, and serve normal byte ranges. If ffmpeg
+            # preparation fails, preserve the existing direct relay as fallback.
+            if _is_dlna_target(self.hass, item.target_media_player):
+                try:
+                    from .dlna_runtime import get_dlna_manager
+
+                    dlna = get_dlna_manager(self.hass)
+                    dlna_path = await dlna.async_prepare_remote(manager, token)
+                except Exception as err:  # noqa: BLE001 - compatibility fallback
+                    _LOGGER.warning(
+                        "Unable to prepare DLNA-compatible MP3; using direct relay: %s",
+                        err,
+                    )
+                else:
+                    return PlayMedia(dlna_path, "audio/mpeg")
 
             # This is an unguessable capability URL. The harmless query string
             # deliberately prevents Home Assistant from appending authSig, which
@@ -98,6 +120,23 @@ class YoutubeDlpMediaSource(MediaSource):
             raise Unresolvable("Media file does not exist")
 
         mime = mimetypes.guess_type(path.name)[0] or _mime_from_suffix(path.suffix)
+        if (
+            _is_dlna_target(self.hass, item.target_media_player)
+            and path.suffix.lower() != ".mp3"
+        ):
+            try:
+                from .dlna_runtime import get_dlna_manager
+
+                dlna = get_dlna_manager(self.hass)
+                dlna_path = await dlna.async_prepare_local(path)
+            except Exception as err:  # noqa: BLE001 - preserve original file fallback
+                _LOGGER.warning(
+                    "Unable to transcode local file for DLNA; using original media: %s",
+                    err,
+                )
+            else:
+                return PlayMedia(dlna_path, "audio/mpeg")
+
         return PlayMedia(
             f"{MEDIA_URL_PREFIX}/{quote(relative, safe='/')}",
             mime,
@@ -173,6 +212,14 @@ def _is_cast_target(hass: HomeAssistant, entity_id: str | None) -> bool:
         return False
     entry = er.async_get(hass).async_get(entity_id)
     return entry is not None and entry.platform == "cast"
+
+
+def _is_dlna_target(hass: HomeAssistant, entity_id: str | None) -> bool:
+    """Return whether a Media Source request targets HA's DLNA DMR platform."""
+    if not entity_id:
+        return False
+    entry = er.async_get(hass).async_get(entity_id)
+    return entry is not None and entry.platform == "dlna_dmr"
 
 
 def _stream_suffix(mime_type: str) -> str:
