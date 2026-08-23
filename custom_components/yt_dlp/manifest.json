@@ -1,0 +1,24 @@
+{
+  "domain": "yt_dlp",
+  "name": "YouTube-DLP",
+  "codeowners": [
+    "@khaisilk1910"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "ffmpeg",
+    "frontend",
+    "media_source"
+  ],
+  "documentation": "https://github.com/khaisilk1910/yt_dlp_hass",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/khaisilk1910/yt_dlp_hass/issues",
+  "requirements": [
+    "yt-dlp==2026.8.19",
+    "yt-dlp-ejs==0.8.0",
+    "nodejs-wheel-binaries==24.19.0"
+  ],
+  "single_config_entry": true,
+  "version": "0.5.20"
+}

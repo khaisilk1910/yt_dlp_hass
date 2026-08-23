@@ -1,0 +1,304 @@
+download:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+    media_type:
+      default: video
+      selector:
+        select:
+          translation_key: media_type
+          options:
+            - video
+            - audio
+    video_options:
+      collapsed: false
+      fields:
+        video_quality:
+          default: best
+          selector:
+            select:
+              options:
+                - best
+                - "2160"
+                - "1440"
+                - "1080"
+                - "720"
+                - "480"
+                - "360"
+        video_format:
+          default: mp4
+          selector:
+            select:
+              options:
+                - mp4
+                - mkv
+                - webm
+    audio_options:
+      collapsed: true
+      fields:
+        audio_format:
+          default: mp3
+          selector:
+            select:
+              options:
+                - mp3
+                - m4a
+                - opus
+                - flac
+                - wav
+        audio_quality:
+          default: best
+          selector:
+            select:
+              options:
+                - best
+                - "320"
+                - "256"
+                - "192"
+                - "128"
+                - "96"
+    overwrite:
+      default: false
+      selector:
+        boolean:
+    wait_for_completion:
+      default: false
+      selector:
+        boolean:
+
+download_video:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+    video_quality:
+      default: best
+      selector:
+        select:
+          options:
+            - best
+            - "2160"
+            - "1440"
+            - "1080"
+            - "720"
+            - "480"
+            - "360"
+    video_format:
+      default: mp4
+      selector:
+        select:
+          options:
+            - mp4
+            - mkv
+            - webm
+    overwrite:
+      default: false
+      selector:
+        boolean:
+    wait_for_completion:
+      default: false
+      selector:
+        boolean:
+
+download_audio:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+    audio_format:
+      default: mp3
+      selector:
+        select:
+          options:
+            - mp3
+            - m4a
+            - opus
+            - flac
+            - wav
+    audio_quality:
+      default: best
+      selector:
+        select:
+          options:
+            - best
+            - "320"
+            - "256"
+            - "192"
+            - "128"
+            - "96"
+    overwrite:
+      default: false
+      selector:
+        boolean:
+    wait_for_completion:
+      default: false
+      selector:
+        boolean:
+
+get_job:
+  fields:
+    job_id:
+      required: true
+      selector:
+        text:
+
+search:
+  fields:
+    query:
+      required: true
+      selector:
+        text:
+    limit:
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 50
+          step: 1
+          mode: box
+
+play:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+          type: url
+    media_player:
+      required: true
+      selector:
+        entity:
+          domain: media_player
+          multiple: false
+
+play_multi:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+          type: url
+    media_players:
+      required: true
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: media_player
+
+scan_library:
+  fields:
+    force:
+      default: false
+      selector:
+        boolean:
+
+favorites_list:
+  fields: {}
+
+favorites_add:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+          type: url
+
+favorites_remove:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+          type: url
+
+favorites_playback_get:
+  fields: {}
+
+favorites_playback_set:
+  fields:
+    online_selected:
+      required: true
+      selector:
+        object:
+    offline_selected:
+      required: true
+      selector:
+        object:
+    repeat_mode:
+      required: true
+      selector:
+        select:
+          options:
+            - "off"
+            - "one"
+            - "all"
+
+favorites_playback_start:
+  fields:
+    kind:
+      required: true
+      selector:
+        select:
+          options:
+            - online
+            - offline
+    queue:
+      required: true
+      selector:
+        object:
+    media_players:
+      required: true
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: media_player
+    repeat_mode:
+      required: true
+      selector:
+        select:
+          options:
+            - "off"
+            - "one"
+            - "all"
+    replace_selection:
+      default: true
+      selector:
+        boolean:
+
+favorites_playback_skip:
+  fields:
+    direction:
+      required: true
+      selector:
+        select:
+          options:
+            - previous
+            - next
+            - current
+
+favorites_playback_stop:
+  fields: {}
+
+get_media_targets:
+  fields: {}
+
+play_targets:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+          type: url
+    media_players:
+      required: true
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: media_player
