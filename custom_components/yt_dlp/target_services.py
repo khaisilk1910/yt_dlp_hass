@@ -30,7 +30,7 @@ from homeassistant.components.media_player import (
     MediaType,
     async_process_play_media_url,
 )
-from homeassistant.const import CONF_URL
+from homeassistant.const import CONF_DEVICE_ID, CONF_TYPE, CONF_URL
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
@@ -63,8 +63,6 @@ _PLAY_TARGETS_SCHEMA = vol.Schema(
 _YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _STREAM_MEDIA_SOURCE_ROOT = f"media-source://{DOMAIN}/{STREAM_MEDIA_SOURCE_PREFIX}"
 _DLNA_PREPARE_TIMEOUT_SECONDS = 120
-_DLNA_RECONNECT_TIMEOUT_SECONDS = 10
-_DLNA_READY_WAIT_SECONDS = 6
 _DLNA_START_VERIFY_SECONDS = 3
 _DLNA_DIRECT_TIMEOUT_SECONDS = 15
 _DLNA_MUSIC_UPNP_CLASS = "object.item.audioItem.musicTrack"
@@ -123,19 +121,48 @@ async def _play_media(
     )
 
 
-def _dlna_device_location(hass: HomeAssistant, entity_id: str) -> str | None:
-    """Return the configured UPnP description URL for a dlna_dmr entity."""
+def _dlna_config_entry(hass: HomeAssistant, entity_id: str):
+    """Return the Home Assistant dlna_dmr config entry for an entity."""
     registry_entry = er.async_get(hass).async_get(entity_id)
     if registry_entry is None or registry_entry.platform != "dlna_dmr":
         return None
-    config_entry_id = registry_entry.config_entry_id
-    if not config_entry_id:
+    if not registry_entry.config_entry_id:
         return None
-    config_entry = hass.config_entries.async_get_entry(config_entry_id)
+    return hass.config_entries.async_get_entry(registry_entry.config_entry_id)
+
+
+async def _async_dlna_device_location(
+    hass: HomeAssistant, entity_id: str
+) -> str | None:
+    """Return the freshest UPnP description URL Home Assistant knows.
+
+    The config entry stores the last-known URL, but a renderer can receive a new
+    DHCP address without that persisted URL changing.  Home Assistant's SSDP
+    scanner keeps the latest LOCATION in memory, so prefer that cache and fall
+    back to the config entry.  This performs no network discovery.
+    """
+    config_entry = _dlna_config_entry(hass, entity_id)
     if config_entry is None:
         return None
-    location = config_entry.data.get(CONF_URL)
-    return str(location) if location else None
+
+    fallback = config_entry.data.get(CONF_URL)
+    udn = str(config_entry.data.get(CONF_DEVICE_ID) or "").strip()
+    st = str(config_entry.data.get(CONF_TYPE) or "").strip()
+    if udn:
+        try:
+            from homeassistant.components import ssdp
+
+            if st:
+                info = await ssdp.async_get_discovery_info_by_udn_st(hass, udn, st)
+                if info is not None and info.ssdp_location:
+                    return str(info.ssdp_location)
+            for info in await ssdp.async_get_discovery_info_by_udn(hass, udn):
+                if info.ssdp_location:
+                    return str(info.ssdp_location)
+        except Exception as err:  # noqa: BLE001 - cached-location fallback below
+            _LOGGER.debug("Could not read SSDP cache for %s: %s", entity_id, err)
+
+    return str(fallback) if fallback else None
 
 
 async def _dlna_base_url(hass: HomeAssistant, entity_id: str) -> str:
@@ -147,7 +174,7 @@ async def _dlna_base_url(hass: HomeAssistant, entity_id: str) -> str:
     the common case where a renderer cannot validate HTTPS certificates.
     """
     api = hass.config.api
-    location = _dlna_device_location(hass, entity_id)
+    location = await _async_dlna_device_location(hass, entity_id)
     if location and api is not None and not api.use_ssl:
         try:
             # Lazy import: the optional managed-target layer must not make
@@ -196,44 +223,6 @@ def _target_is_available(hass: HomeAssistant, entity_id: str) -> bool:
     return state is not None and state.state not in {"unavailable", "unknown"}
 
 
-async def _async_ensure_dlna_ready(hass: HomeAssistant, entity_id: str) -> bool:
-    """Give an unavailable HA dlna_dmr entity one bounded reconnect attempt.
-
-    Home Assistant's dlna_dmr entity deliberately ignores service calls while
-    ``available`` is false. Reloading only that renderer's config entry makes HA
-    retry the last-known UPnP location without adding permanent polling or any
-    work to Home Assistant startup.
-    """
-    if _target_is_available(hass, entity_id):
-        return True
-
-    registry_entry = er.async_get(hass).async_get(entity_id)
-    if (
-        registry_entry is None
-        or registry_entry.platform != "dlna_dmr"
-        or not registry_entry.config_entry_id
-    ):
-        return False
-
-    try:
-        async with asyncio.timeout(_DLNA_RECONNECT_TIMEOUT_SECONDS):
-            reloaded = await hass.config_entries.async_reload(
-                registry_entry.config_entry_id
-            )
-        if not reloaded:
-            return False
-    except Exception as err:  # noqa: BLE001 - playback should report, not crash core
-        _LOGGER.debug("DLNA reconnect failed for %s: %s", entity_id, err)
-        return False
-
-    deadline = hass.loop.time() + _DLNA_READY_WAIT_SECONDS
-    while hass.loop.time() < deadline:
-        if _target_is_available(hass, entity_id):
-            return True
-        await asyncio.sleep(0.25)
-    return _target_is_available(hass, entity_id)
-
-
 async def _async_wait_dlna_started(
     hass: HomeAssistant, entity_id: str, relay_url: str
 ) -> bool:
@@ -271,7 +260,7 @@ async def _async_direct_dlna_play(
     unavailable or accepted the service call without observable playback.
     It does not subscribe to events or create background tasks.
     """
-    location = _dlna_device_location(hass, entity_id)
+    location = await _async_dlna_device_location(hass, entity_id)
     if not location:
         raise RuntimeError("No DLNA DMR location is available for direct fallback")
 
@@ -281,7 +270,7 @@ async def _async_direct_dlna_play(
     from async_upnp_client.profiles.dlna import DmrDevice
     from homeassistant.components.dlna_dmr.data import get_domain_data
 
-    from .dlna import DLNA_CONTENT_FEATURES, DLNA_MIME_TYPE
+    from .dlna import DLNA_MIME_TYPE
 
     domain_data = get_domain_data(hass)
     upnp_device = await domain_data.upnp_factory.async_create_device(location)
@@ -291,12 +280,14 @@ async def _async_direct_dlna_play(
     meta_data: dict[str, str] = {}
     if artist:
         meta_data["artist"] = artist
+    # Match Home Assistant/async_upnp_client behavior: let the DMR client HEAD/GET
+    # the relay and reconcile ContentFeatures with ConnectionManager protocol info.
+    # We only force the known MIME and musicTrack class.
     didl = await device.construct_play_media_metadata(
         media_url=relay_url,
         media_title=title or "Home Assistant",
         override_mime_type=DLNA_MIME_TYPE,
         override_upnp_class=_DLNA_MUSIC_UPNP_CLASS,
-        override_dlna_features=DLNA_CONTENT_FEATURES,
         meta_data=meta_data,
     )
 
@@ -305,17 +296,31 @@ async def _async_direct_dlna_play(
 
     try:
         await device.async_set_transport_uri(relay_url, title or "Home Assistant", didl)
-    except UpnpError as err:
-        # A small class of embedded renderers rejects otherwise-valid DIDL
-        # (commonly UPnP 714). They still accept the same MP3 URI when
-        # CurrentURIMetaData is empty, so retry once with the most conservative
-        # AVTransport payload.
-        _LOGGER.debug(
-            "DLNA renderer %s rejected DIDL metadata, retrying URI-only: %s",
-            entity_id,
-            err,
-        )
-        await device.async_set_transport_uri(relay_url, title or "Home Assistant", "")
+    except UpnpError as first_err:
+        # Some embedded DMRs accept MP3 but reject a concrete DLNA profile. Try
+        # protocolInfo with wildcard features before the final URI-only fallback.
+        try:
+            conservative_didl = await device.construct_play_media_metadata(
+                media_url=relay_url,
+                media_title=title or "Home Assistant",
+                override_mime_type=DLNA_MIME_TYPE,
+                override_upnp_class=_DLNA_MUSIC_UPNP_CLASS,
+                override_dlna_features="*",
+                meta_data=meta_data,
+            )
+            await device.async_set_transport_uri(
+                relay_url, title or "Home Assistant", conservative_didl
+            )
+        except UpnpError as second_err:
+            _LOGGER.debug(
+                "DLNA renderer %s rejected DIDL metadata (%s; %s), retrying URI-only",
+                entity_id,
+                first_err,
+                second_err,
+            )
+            await device.async_set_transport_uri(
+                relay_url, title or "Home Assistant", ""
+            )
 
     await device.async_wait_for_can_play(max_wait_time=5)
     await device.async_play()
@@ -433,41 +438,52 @@ def async_register_target_services(hass: HomeAssistant) -> None:
                 for entity_id in dlna_targets:
                     try:
                         relay_url = await _dlna_media_url(hass, entity_id, relay_path)
-                        ha_ready = await _async_ensure_dlna_ready(hass, entity_id)
+                        ha_ready = _target_is_available(hass, entity_id)
                         method = "dlna_ha_dmr"
                         started = False
 
+                        # Never send a Home Assistant service target for an entity
+                        # that HA currently marks unavailable/missing.  The service
+                        # helper rejects that target before dlna_dmr can run, which
+                        # is exactly the "Referenced entities ... are missing or not
+                        # currently available" error.  Use AVTransport directly in
+                        # that state instead.
                         if ha_ready:
-                            await _play_media(
-                                hass,
-                                entity_id,
-                                media_id=relay_url,
-                                # ``music`` makes HA dlna_dmr use the musicTrack
-                                # UPnP class while HEAD/GET discovers audio/mpeg.
-                                media_type=MediaType.MUSIC,
-                                metadata=metadata,
-                                context=call.context,
-                            )
-                            # dlna_dmr deliberately catches UpnpError internally.
-                            # A blocking HA service call can therefore return even
-                            # after SetAVTransportURI/Play failed. Verify briefly
-                            # before deciding whether the direct fallback is needed.
-                            started = await _async_wait_dlna_started(
-                                hass, entity_id, relay_url
-                            )
+                            try:
+                                await _play_media(
+                                    hass,
+                                    entity_id,
+                                    media_id=relay_url,
+                                    # ``music`` makes HA dlna_dmr use musicTrack
+                                    # while HEAD/GET discovers audio/mpeg.
+                                    media_type=MediaType.MUSIC,
+                                    metadata=metadata,
+                                    context=call.context,
+                                )
+                            except Exception as err:  # noqa: BLE001 - direct fallback
+                                _LOGGER.debug(
+                                    "HA dlna_dmr service path failed for %s: %s",
+                                    entity_id,
+                                    err,
+                                )
+                            else:
+                                started = await _async_wait_dlna_started(
+                                    hass, entity_id, relay_url
+                                )
 
                         if not started:
-                            if _dlna_device_location(hass, entity_id) is None:
-                                if not ha_ready:
+                            location = await _async_dlna_device_location(hass, entity_id)
+                            if location is None:
+                                if ha_ready:
+                                    # A user may classify another media_player
+                                    # platform as DLNA.  Only its own HA service can
+                                    # control it because there is no DMR description.
+                                    method = "dlna_platform_mp3"
+                                else:
                                     raise RuntimeError(
-                                        "DLNA renderer is unavailable and has no "
-                                        "dlna_dmr location for direct fallback"
+                                        "DLNA renderer is unavailable and no UPnP "
+                                        "description URL is known"
                                     )
-                                # A user may classify another media_player platform
-                                # as DLNA. In that case we cannot safely use HA's
-                                # dlna_dmr internals; the platform service call above
-                                # is the only valid control path.
-                                method = "dlna_platform_mp3"
                             else:
                                 async with asyncio.timeout(_DLNA_DIRECT_TIMEOUT_SECONDS):
                                     await _async_direct_dlna_play(
@@ -477,7 +493,11 @@ def async_register_target_services(hass: HomeAssistant) -> None:
                                         title=info.title,
                                         artist=info.artist,
                                     )
-                                method = "dlna_direct_fallback"
+                                method = (
+                                    "dlna_direct_unavailable"
+                                    if not ha_ready
+                                    else "dlna_direct_fallback"
+                                )
 
                         playback.async_track_remote_playback(
                             entity_id, url, info, media_source_id

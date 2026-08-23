@@ -23,9 +23,12 @@ from aiohttp import ClientError, ClientTimeout, web
 from homeassistant.components.http import KEY_HASS, HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.importlib import async_import_module
 
 if TYPE_CHECKING:
     from .playback import PlaybackManager, StreamSession
+
+from .helpers import detect_javascript_runtime, youtube_dl_class
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +42,12 @@ _DLNA_CACHE_TTL_SECONDS = 8 * 60 * 60
 _MAX_DLNA_CACHE_ITEMS = 24
 _REMOTE_TIMEOUT = ClientTimeout(total=None, connect=20, sock_connect=20, sock_read=90)
 _RETRYABLE_UPSTREAM_STATUSES = frozenset({401, 403, 404, 410, 416, 429})
+_YOUTUBE_DOWNLOAD_CLIENT_PROFILES: tuple[tuple[str, ...], ...] = (
+    ("default", "web_embedded"),
+    ("android_vr",),
+    ("web_embedded",),
+    ("web_safari",),
+)
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -193,14 +202,23 @@ class DlnaPlaybackManager:
         ffmpeg = await self._async_resolve_ffmpeg()
         last_error: Exception | None = None
 
-        # Keep fallbacks bounded. The normal playback resolver already rotates
-        # extractor routes; DLNA only needs a small number of fresh attempts.
+        # Mirror the relay's bounded refresh matrix.  A one-byte probe may pass
+        # while a later full request gets 403, so each rejected URL is refreshed
+        # through the same known-good client/quality routes used by normal Play.
         attempts: tuple[tuple[bool | None, tuple[str, ...] | None], ...] = (
             (None, None),
             (False, None),
+            (True, None),
+            (False, ("android_vr",)),
             (True, ("android_vr",)),
+            (False, ("web_embedded",)),
             (True, ("web_embedded",)),
+            (False, ("web_safari",)),
+            (True, ("web_safari",)),
         )
+
+        original = playback.get_stream_session(stream_token)
+        source_url = original.source_url if original is not None else None
 
         for advance_route, player_clients in attempts:
             if advance_route is None:
@@ -224,6 +242,22 @@ class DlnaPlaybackManager:
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 - try next safe source route
+                last_error = err
+                await self.hass.async_add_executor_job(_safe_unlink, output_path)
+
+        # If every direct GoogleVideo URL is rejected, use yt-dlp's downloader
+        # as the final materialization path.  This deliberately re-extracts the
+        # original YouTube page and uses check_formats=selected, the same robust
+        # behavior that already makes the integration's Download service work.
+        if source_url:
+            try:
+                await self._async_materialize_with_ytdlp(
+                    source_url, ffmpeg, output_path
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - surface both paths below
                 last_error = err
                 await self.hass.async_add_executor_job(_safe_unlink, output_path)
 
@@ -275,6 +309,12 @@ class DlnaPlaybackManager:
             if key.casefold() not in _HOP_BY_HOP_HEADERS
             and key.casefold() not in {"authorization", "proxy-authorization"}
         }
+        # YouTube's media CDN increasingly accepts a byte-range fetch while the
+        # equivalent un-ranged full GET returns 403.  The normal speaker relay
+        # already benefits from renderer Range requests; DLNA transcode must do
+        # the same explicitly because ffmpeg is fed through this pipe.
+        headers["Range"] = "bytes=0-"
+        headers.setdefault("Accept-Encoding", "identity")
         client = async_get_clientsession(self.hass)
         response = None
         try:
@@ -315,6 +355,33 @@ class DlnaPlaybackManager:
                 response.release()
             if process.returncode is None:
                 await _async_terminate_process(process)
+
+    async def _async_materialize_with_ytdlp(
+        self, source_url: str, ffmpeg: str, output_path: Path
+    ) -> None:
+        """Download a fresh source with yt-dlp, then transcode it to MP3.
+
+        This is a DLNA-only fallback for YouTube CDN URLs that probe correctly
+        but later reject every direct transfer with HTTP 403.  It is lazy and
+        runs only after the direct path has failed, so regular Play/Download and
+        Home Assistant startup remain untouched.
+        """
+        staging_dir = output_path.parent / f".{output_path.stem}.yt-dlp"
+        await self.hass.async_add_executor_job(_safe_rmtree, staging_dir)
+        await self.hass.async_add_executor_job(staging_dir.mkdir, 0o700, True, True)
+        try:
+            yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
+            youtube_dl_cls = youtube_dl_class(yt_dlp_module)
+            source_path = await self.hass.async_add_executor_job(
+                _download_dlna_source_sync,
+                youtube_dl_cls,
+                source_url,
+                staging_dir,
+                ffmpeg,
+            )
+            await self._run_ffmpeg_file(ffmpeg, source_path, output_path)
+        finally:
+            await self.hass.async_add_executor_job(_safe_rmtree, staging_dir)
 
     async def _run_ffmpeg_file(
         self, ffmpeg: str, source_path: Path, output_path: Path
@@ -508,6 +575,78 @@ def _valid_media_size(path: Path) -> int:
 def _copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
+
+
+def _download_dlna_source_sync(
+    youtube_dl_cls, source_url: str, staging_dir: Path, ffmpeg: str
+) -> Path:
+    """Materialize one fresh downloadable audio source with yt-dlp."""
+    runtime = detect_javascript_runtime()
+    last_error: Exception | None = None
+
+    for player_clients in _YOUTUBE_DOWNLOAD_CLIENT_PROFILES:
+        # A fresh directory per profile avoids a failed partial file being
+        # mistaken for a successful source by the next retry.
+        profile_dir = staging_dir / ("-".join(player_clients) or "default")
+        _safe_rmtree(profile_dir)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        opts: dict[str, object] = {
+            "paths": {"home": str(profile_dir), "temp": str(profile_dir)},
+            "outtmpl": {"default": "source.%(ext)s"},
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "overwrites": True,
+            "continuedl": True,
+            "nopart": False,
+            "quiet": True,
+            "no_warnings": True,
+            "retries": 5,
+            "fragment_retries": 5,
+            "file_access_retries": 3,
+            "socket_timeout": 30,
+            "concurrent_fragment_downloads": 4,
+            "check_formats": "selected",
+            "ffmpeg_location": ffmpeg,
+            "extractor_args": {
+                "youtube": {"player_client": list(player_clients)}
+            },
+        }
+        if runtime:
+            name, path = runtime
+            opts["js_runtimes"] = {name: {"path": path}}
+
+        try:
+            with youtube_dl_cls(opts) as ydl:
+                info = ydl.extract_info(source_url, download=True)
+        except Exception as err:  # yt-dlp exposes multiple DownloadError variants
+            last_error = err
+            continue
+
+        candidates: list[Path] = []
+        if isinstance(info, dict):
+            requested = info.get("requested_downloads")
+            if isinstance(requested, list):
+                for item in requested:
+                    if isinstance(item, dict) and item.get("filepath"):
+                        candidates.append(Path(str(item["filepath"])))
+            filename = info.get("_filename")
+            if filename:
+                candidates.append(Path(str(filename)))
+
+        candidates.extend(
+            path
+            for path in profile_dir.iterdir()
+            if path.is_file() and not path.name.endswith((".part", ".ytdl"))
+        )
+        valid = [path for path in candidates if path.is_file() and path.stat().st_size > 0]
+        if valid:
+            return max(valid, key=lambda path: path.stat().st_size)
+
+        last_error = RuntimeError("yt-dlp completed without a materialized source file")
+
+    if last_error is not None:
+        raise RuntimeError(f"yt-dlp DLNA source fallback failed: {last_error}") from last_error
+    raise RuntimeError("yt-dlp DLNA source fallback failed")
 
 
 def _replace_file(source: Path, destination: Path) -> None:
