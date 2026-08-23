@@ -65,6 +65,7 @@ _STREAM_PROBE_OK = frozenset({200, 206})
 _STREAM_PROBE_SWITCH_CLIENT = frozenset({401, 429})
 _MAX_AUDIO_QUALITY_ROUTES = 32
 _MAX_MUXED_QUALITY_ROUTES = 16
+_MAX_VIDEO_QUALITY_ROUTES = 24
 _MAX_PLAYER_RELOAD_RETRIES = 3
 _PLAYER_RELOAD_RETRY_DELAY_SECONDS = 0.6
 
@@ -145,6 +146,7 @@ class StreamSession:
     info: StreamInfo
     created_at: float
     last_access: float
+    media_kind: str = "audio"
 
 
 @dataclass(slots=True)
@@ -642,6 +644,40 @@ class PlaybackManager:
                         continue
                     raise
 
+    async def async_resolve_video_stream(
+        self,
+        url: str,
+        route_indexes: tuple[int, ...] | None = None,
+        *,
+        player_clients: tuple[str, ...] | None = None,
+    ) -> StreamInfo:
+        """Resolve one direct muxed video route suitable for TVs."""
+        indexes = route_indexes or tuple(range(_MAX_VIDEO_QUALITY_ROUTES))
+        async with self._stream_lock:
+            yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
+            youtube_dl_cls = youtube_dl_class(yt_dlp_module)
+            reload_attempt = 0
+            while True:
+                try:
+                    return await self.hass.async_add_executor_job(
+                        self._resolve_video_stream_sync,
+                        url,
+                        youtube_dl_cls,
+                        indexes,
+                        player_clients,
+                    )
+                except Exception as err:  # noqa: BLE001 - yt-dlp errors vary
+                    if (
+                        _page_reload_error(err)
+                        and reload_attempt < _MAX_PLAYER_RELOAD_RETRIES - 1
+                    ):
+                        reload_attempt += 1
+                        await asyncio.sleep(
+                            _PLAYER_RELOAD_RETRY_DELAY_SECONDS * reload_attempt
+                        )
+                        continue
+                    raise
+
     def _resolve_stream_sync(
         self,
         url: str,
@@ -828,6 +864,139 @@ class PlaybackManager:
             )
 
 
+    def _resolve_video_stream_sync(
+        self,
+        url: str,
+        youtube_dl_cls: type[Any],
+        route_indexes: tuple[int, ...],
+        player_clients: tuple[str, ...] | None,
+    ) -> StreamInfo:
+        """Blocking selection of a real direct muxed video URL for TV playback."""
+        from yt_dlp.utils import DownloadError
+
+        indexes = tuple(index for index in route_indexes if 0 <= index < _MAX_VIDEO_QUALITY_ROUTES)
+        if not indexes:
+            raise DownloadError("No supported TV playback route is available")
+
+        opts: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "ignore_no_formats_error": True,
+            "socket_timeout": 20,
+            "retries": 3,
+            "extractor_retries": 3,
+        }
+        if js_runtimes := self._js_runtime_options():
+            opts["js_runtimes"] = js_runtimes
+        if player_clients:
+            opts["extractor_args"] = {"youtube": {"player_client": list(player_clients)}}
+
+        def _number(value: Any) -> float:
+            try:
+                return float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _rank(candidate: dict[str, Any]) -> tuple[float, ...]:
+            ext = str(candidate.get("ext") or "").lower()
+            acodec = str(candidate.get("acodec") or "").lower()
+            vcodec = str(candidate.get("vcodec") or "").lower()
+            h264 = vcodec.startswith(("avc1", "h264"))
+            aac = acodec.startswith("mp4a") or "aac" in acodec
+            if ext == "mp4" and h264 and aac:
+                compatibility = 5.0
+            elif ext == "mp4" and h264:
+                compatibility = 4.0
+            elif ext == "mp4":
+                compatibility = 3.0
+            elif ext == "webm":
+                compatibility = 2.0
+            else:
+                compatibility = 1.0
+            return (
+                compatibility,
+                _number(candidate.get("height")),
+                _number(candidate.get("fps")),
+                _number(candidate.get("tbr")),
+                _number(candidate.get("filesize")) or _number(candidate.get("filesize_approx")),
+            )
+
+        with youtube_dl_cls(opts) as ydl:
+            info = ydl.extract_info(url, download=False, process=False)
+            if not isinstance(info, dict):
+                raise DownloadError("yt-dlp did not return media information")
+            formats = info.get("formats")
+            raw_formats = list(formats) if isinstance(formats, list) else []
+            if isinstance(info.get("url"), str):
+                raw_formats.append(info)
+
+            muxed: list[dict[str, Any]] = []
+            seen_urls: set[str] = set()
+            for candidate in raw_formats:
+                if not isinstance(candidate, dict):
+                    continue
+                stream_url = candidate.get("url")
+                if (
+                    not isinstance(stream_url, str)
+                    or not stream_url.startswith(("http://", "https://"))
+                    or stream_url in seen_urls
+                ):
+                    continue
+                protocol = str(candidate.get("protocol") or "").lower()
+                if protocol and protocol not in {"http", "https"}:
+                    continue
+                if bool(candidate.get("has_drm")):
+                    continue
+                acodec = str(candidate.get("acodec") or "none").lower()
+                vcodec = str(candidate.get("vcodec") or "none").lower()
+                if acodec in {"", "none"} or vcodec in {"", "none"}:
+                    continue
+                seen_urls.add(stream_url)
+                muxed.append(candidate)
+
+            muxed.sort(key=_rank, reverse=True)
+            selected = next((muxed[index] for index in indexes if index < len(muxed)), None)
+            if selected is None:
+                raise DownloadError("Requested format is not available")
+            selected_route = next(index for index in indexes if index < len(muxed))
+            stream_url = str(selected["url"])
+            headers: dict[str, str] = {}
+            for raw_headers in (info.get("http_headers"), selected.get("http_headers")):
+                if hasattr(raw_headers, "items"):
+                    headers.update(
+                        {str(key): str(value) for key, value in raw_headers.items() if value is not None}
+                    )
+            try:
+                cookie_header = ydl.cookiejar.get_cookie_header(stream_url)
+            except (AttributeError, ValueError):
+                cookie_header = None
+            if cookie_header:
+                headers["Cookie"] = str(cookie_header)
+
+            ext = str(selected.get("ext") or info.get("ext") or "").lower()
+            acodec = str(selected.get("acodec") or info.get("acodec") or "").lower()
+            vcodec = str(selected.get("vcodec") or info.get("vcodec") or "").lower()
+            mime_type = _stream_mime_type(ext, acodec, vcodec)
+            if not mime_type.startswith("video/"):
+                mime_type = "video/mp4" if ext == "mp4" else "video/webm" if ext == "webm" else mime_type
+            artist_value = info.get("artist") or info.get("channel") or info.get("uploader")
+            return StreamInfo(
+                url=stream_url,
+                title=str(info.get("title") or info.get("fulltitle") or "YouTube video"),
+                thumbnail=_best_thumbnail(info),
+                artist=str(artist_value) if artist_value else None,
+                duration=info.get("duration"),
+                mime_type=mime_type,
+                file_format=ext or _format_from_mime(mime_type),
+                webpage_url=str(info.get("webpage_url") or info.get("original_url") or url),
+                http_headers=headers,
+                route_index=selected_route,
+                player_clients=player_clients,
+            )
+
+
     async def async_create_stream(self, url: str) -> tuple[StreamInfo, str]:
         """Create a Home Assistant Media Source ID for one verified remote stream."""
         # Verify the selected GoogleVideo URL from Home Assistant before handing
@@ -848,8 +1017,60 @@ class PlaybackManager:
             info=info,
             created_at=now,
             last_access=now,
+            media_kind="audio",
         )
         return info, f"media-source://yt_dlp/{STREAM_MEDIA_SOURCE_PREFIX}{token}"
+
+    async def async_create_video_stream(self, url: str) -> tuple[StreamInfo, str]:
+        """Create a verified muxed video relay session for non-native TVs."""
+        info = await self._async_resolve_playable_video_stream(url)
+        now = time.monotonic()
+        self._prune_stream_sessions(now)
+        while True:
+            token = secrets.token_urlsafe(24)
+            if token not in self._stream_sessions:
+                break
+        self._stream_sessions[token] = StreamSession(
+            token=token,
+            source_url=url,
+            info=info,
+            created_at=now,
+            last_access=now,
+            media_kind="video",
+        )
+        return info, f"media-source://yt_dlp/{STREAM_MEDIA_SOURCE_PREFIX}{token}"
+
+    async def _async_resolve_playable_video_stream(self, url: str) -> StreamInfo:
+        """Resolve/probe muxed video using bounded client and quality fallbacks."""
+        last_error: Exception | None = None
+        for player_clients in YOUTUBE_CLIENT_FALLBACKS:
+            for route_index in range(_MAX_VIDEO_QUALITY_ROUTES):
+                try:
+                    info = await self.async_resolve_video_stream(
+                        url, (route_index,), player_clients=player_clients
+                    )
+                except Exception as err:  # noqa: BLE001
+                    last_error = err
+                    if _requested_format_unavailable(err):
+                        break
+                    if _no_player_clients_error(err):
+                        break
+                    continue
+                try:
+                    status = await self._async_probe_stream(info)
+                except (ClientError, TimeoutError, OSError) as err:
+                    last_error = err
+                    continue
+                if status in _STREAM_PROBE_OK:
+                    return info
+                last_error = RuntimeError(
+                    f"YouTube video URL rejected the probe with HTTP {status}"
+                )
+                if status in _STREAM_PROBE_SWITCH_CLIENT:
+                    break
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No playable YouTube video stream is available")
 
     async def _async_resolve_playable_stream(self, url: str) -> StreamInfo:
         """Resolve and probe a stream using bounded client/format fallbacks."""
@@ -966,20 +1187,25 @@ class PlaybackManager:
             return None
 
         current = session.info.route_index
+        route_count = (
+            _MAX_VIDEO_QUALITY_ROUTES
+            if session.media_kind == "video"
+            else len(STREAM_FORMAT_SELECTORS)
+        )
         if advance_route:
-            # Cycle through every *other* route exactly once, then stop. The
-            # previous implementation only considered routes after the current
-            # index and could miss a known-good earlier route after a refresh.
-            indexes = (
-                tuple(range(current + 1, len(STREAM_FORMAT_SELECTORS)))
-                + tuple(range(0, current))
-            )
+            # Cycle through every *other* route exactly once, then stop.
+            indexes = tuple(range(current + 1, route_count)) + tuple(range(0, current))
             if not indexes:
                 indexes = (current,)
         else:
             indexes = (current,)
 
-        info = await self.async_resolve_stream(
+        resolver = (
+            self.async_resolve_video_stream
+            if session.media_kind == "video"
+            else self.async_resolve_stream
+        )
+        info = await resolver(
             session.source_url,
             indexes,
             player_clients=(

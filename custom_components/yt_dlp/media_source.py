@@ -69,7 +69,10 @@ class YoutubeDlpMediaSource(MediaSource):
             # DLNA is an optional compatibility path. Build a complete MP3 with
             # byte ranges + DLNA headers when possible, but never let DLNA
             # preparation failure take down the original direct playback path.
-            if _is_dlna_target(self.hass, item.target_media_player):
+            if (
+                stream_session.info.mime_type.startswith("audio/")
+                and _is_dlna_target(self.hass, item.target_media_player)
+            ):
                 try:
                     from .dlna_runtime import get_dlna_manager
 
@@ -213,9 +216,21 @@ def _is_cast_target(hass: HomeAssistant, entity_id: str | None) -> bool:
 
 
 def _is_dlna_target(hass: HomeAssistant, entity_id: str | None) -> bool:
-    """Return whether a Media Source request targets HA's DLNA DMR platform."""
+    """Return whether this request should use the DLNA audio compatibility path.
+
+    A configured user classification wins over platform auto-detection. This is
+    important for DLNA-capable TVs: when classified as TV they must receive a
+    video stream rather than an MP3 conversion. Legacy/unconfigured service
+    calls keep v0.5.16 behavior by falling back to the HA entity platform.
+    """
     if not entity_id:
         return False
+    from .const import TARGET_TYPE_DLNA
+    from .media_targets import configured_target
+
+    configured = configured_target(hass, entity_id)
+    if configured is not None:
+        return configured.target_type == TARGET_TYPE_DLNA
     entry = er.async_get(hass).async_get(entity_id)
     return entry is not None and entry.platform == "dlna_dmr"
 

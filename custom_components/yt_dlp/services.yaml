@@ -284,3 +284,6 @@ favorites_playback_skip:
 
 favorites_playback_stop:
   fields: {}
+
+get_media_targets:
+  fields: {}

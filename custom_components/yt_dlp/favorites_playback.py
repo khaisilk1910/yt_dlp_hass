@@ -28,6 +28,7 @@ from homeassistant.helpers.storage import Store
 from .const import DOMAIN, SERVICE_PLAY, SERVICE_PLAY_MULTI, STATE_FAVORITES_PLAYBACK
 from .favorites import FavoritesStore
 from .playback import PlaybackManager
+from .target_playback import async_play_url_on_targets
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -551,40 +552,27 @@ class FavoritesPlaybackController:
         item = next((entry for entry in items if entry.get("url") == url), None)
         if item is None:
             raise ValueError("Selected Online favorite no longer exists")
-
-        info, media_source_id = await self.playback.async_create_stream(url)
         if not await self._async_session_is_current(generation, "online", url, players):
             return
-        metadata: dict[str, object] = {"title": info.title}
-        if info.artist:
-            metadata["artist"] = info.artist
-        if info.thumbnail:
-            metadata["images"] = [{"url": info.thumbnail}]
 
-        await self.hass.services.async_call(
-            "media_player",
-            SERVICE_PLAY_MEDIA,
-            service_data={
-                ATTR_MEDIA_CONTENT_ID: media_source_id,
-                ATTR_MEDIA_CONTENT_TYPE: info.mime_type,
-                ATTR_MEDIA_EXTRA: {"metadata": metadata},
-            },
-            target={"entity_id": players},
-            blocking=True,
+        info, results = await async_play_url_on_targets(
+            self.hass, self.playback, url, list(players)
         )
+        if not any(result.success for result in results):
+            errors = "; ".join(result.error or result.entity_id for result in results)
+            raise RuntimeError(errors or "No Favorites playback target succeeded")
         if not await self._async_session_is_current(generation, "online", url, players):
-            await self._async_stop_stale_players(players, media_source_id)
+            # Do not stop here: mixed TV/speaker playback can use different media
+            # IDs, and a newer user request may already have replaced this one.
             return
-        for entity_id in players:
-            self.playback.async_track_remote_playback(entity_id, url, info, media_source_id)
 
         current = {
             "key": url,
-            "title": info.title,
-            "artist": info.artist,
-            "thumbnail": info.thumbnail,
-            "duration": info.duration,
-            "mime_type": info.mime_type,
+            "title": info.title if info is not None else item.get("title") or "YouTube",
+            "artist": info.artist if info is not None else item.get("artist"),
+            "thumbnail": info.thumbnail if info is not None else item.get("thumbnail"),
+            "duration": info.duration if info is not None else item.get("duration"),
+            "mime_type": info.mime_type if info is not None else "video/youtube",
         }
         async with self._lock:
             if (
