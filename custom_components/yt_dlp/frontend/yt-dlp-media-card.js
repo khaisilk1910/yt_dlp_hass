@@ -1465,12 +1465,15 @@ class YtDlpMediaCard extends HTMLElement {
 
   async _playConfiguredUrl(url, selectedPlayers = this._targetPlayers()) {
     if (!selectedPlayers.length) throw new Error("Chưa chọn thiết bị phát");
-    const hasTv = selectedPlayers.some((entityId) => this._targetType(entityId) === "tv");
+    const hasManagedSpecialTarget = selectedPlayers.some((entityId) => {
+      const type = this._targetType(entityId);
+      return type === "dlna" || type === "tv";
+    });
 
-    // Speaker + DLNA use the untouched v0.5.16 play/play_multi services. TV is
-    // intentionally isolated behind play_targets so TV-specific code can never
-    // break the protected audio/download core.
-    if (!hasTv) {
+    // Keep ordinary speakers on the untouched v0.5.16 play/play_multi path.
+    // DLNA and TV intentionally use the isolated dispatcher so the configured
+    // target type actually selects the appropriate playback mechanism.
+    if (!hasManagedSpecialTarget) {
       return selectedPlayers.length > 1
         ? this._callServiceResponse("yt_dlp", "play_multi", { url, media_players: selectedPlayers })
         : this._callServiceResponse("yt_dlp", "play", { url, media_player: selectedPlayers[0] });
