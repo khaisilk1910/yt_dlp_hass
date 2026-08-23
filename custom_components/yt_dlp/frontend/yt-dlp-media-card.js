@@ -8,6 +8,11 @@ class YtDlpMediaCard extends HTMLElement {
     this._hass = null;
     this._selectedPlayer = "";
     this._selectedPlayers = [];
+    this._managedTargets = [];
+    this._managedTargetsLoaded = false;
+    this._managedTargetsLoading = false;
+    this._managedTargetsRetryAt = 0;
+    this._managedTargetsLoadedAt = 0;
     this._view = "player";
     this._favoritesTab = "online";
     this._youtubeUrl = "";
@@ -118,7 +123,6 @@ class YtDlpMediaCard extends HTMLElement {
       schema: [
         { name: "subtitle", selector: { text: {} } },
         { name: "title", selector: { text: {} } },
-        { name: "media_players", selector: { entity: { filter: { domain: "media_player" }, multiple: true, reorder: true } } },
         {
           name: "color_preset",
           selector: {
@@ -144,12 +148,10 @@ class YtDlpMediaCard extends HTMLElement {
       computeLabel: (schema) => ({
         subtitle: "Dòng tiêu đề trên",
         title: "Tiêu đề thẻ",
-        media_players: "Loa mặc định",
         color_preset: "Mẫu màu",
         background_opacity: "Độ trong suốt nền thẻ",
       })[schema.name],
       computeHelper: (schema) => ({
-        media_players: "Có thể chọn một hoặc nhiều loa để phát cùng lúc; loa đầu tiên là loa chính hiển thị trạng thái. Cấu hình media_player cũ vẫn được hỗ trợ.",
         background_opacity: "Kéo thanh để chỉnh độ đậm của nền thẻ: 0% là trong suốt, 100% là nền đầy đủ.",
       })[schema.name],
     };
@@ -163,11 +165,7 @@ class YtDlpMediaCard extends HTMLElement {
       background_opacity: 100,
       ...(config || {}),
     };
-    const configuredPlayers = this._configuredPlayers();
-    if (!this._speakerSelectionRestored && configuredPlayers.length) {
-      this._selectedPlayers = configuredPlayers;
-      this._selectedPlayer = configuredPlayers[0];
-    }
+    // Playback targets are managed in the integration options, not per card.
     this._render();
   }
 
@@ -181,17 +179,19 @@ class YtDlpMediaCard extends HTMLElement {
     const favoritePlaybackChanged = this._syncFavoritePlaybackFromEntity(hass.states["yt_dlp.favorites_playback"]);
     const players = this._players();
 
-    this._selectedPlayers = this._selectedPlayers.filter((entityId) => Boolean(hass.states[entityId]));
-    if (!this._selectedPlayers.length) {
-      const configured = this._configuredPlayers().filter((entityId) => Boolean(hass.states[entityId]));
-      const candidates = configured.length ? configured : players.map((player) => player.entity_id);
-      const active = candidates.find((entityId) => ["playing", "paused", "buffering"].includes(hass.states[entityId]?.state));
-      this._selectedPlayers = active ? [active] : (candidates[0] ? [candidates[0]] : []);
-    }
-    this._selectedPlayer = this._selectedPlayers[0] || "";
-    if (this._selectedPlayers.length && (!this._speakerSelectionRestored || previousSelection !== this._selectedPlayers.join("|"))) {
-      this._persistSpeakerSelection();
-      this._speakerSelectionRestored = true;
+    if (this._managedTargetsLoaded) {
+      const allowed = new Set(this._configuredPlayers());
+      this._selectedPlayers = this._selectedPlayers.filter((entityId) => allowed.has(entityId) && this._targetAvailable(entityId));
+      if (!this._selectedPlayers.length) {
+        const candidates = players.map((player) => player.entity_id).filter((entityId) => this._targetAvailable(entityId));
+        const active = candidates.find((entityId) => ["playing", "paused", "buffering"].includes(hass.states[entityId]?.state));
+        this._selectedPlayers = active ? [active] : (candidates[0] ? [candidates[0]] : []);
+      }
+      this._selectedPlayer = this._selectedPlayers[0] || "";
+      if (this._selectedPlayers.length && (!this._speakerSelectionRestored || previousSelection !== this._selectedPlayers.join("|"))) {
+        this._persistSpeakerSelection();
+        this._speakerSelectionRestored = true;
+      }
     }
 
     const currentState = hass.states[this._selectedPlayer];
@@ -213,6 +213,13 @@ class YtDlpMediaCard extends HTMLElement {
       && Date.now() >= this._favoritePlaybackRetryAt
     ) {
       queueMicrotask(() => this._loadFavoritePlaybackState());
+    }
+    if (
+      !this._managedTargetsLoading
+      && Date.now() >= this._managedTargetsRetryAt
+      && (!this._managedTargetsLoaded || Date.now() - this._managedTargetsLoadedAt > 30000)
+    ) {
+      queueMicrotask(() => this._loadManagedTargets());
     }
   }
 
@@ -244,33 +251,44 @@ class YtDlpMediaCard extends HTMLElement {
     };
   }
 
+  _managedTarget(entityId) {
+    return this._managedTargets.find((target) => target.entity_id === entityId) || null;
+  }
+
+  _targetAvailable(entityId) {
+    const state = this._hass?.states?.[entityId];
+    return Boolean(state) && !["unavailable", "unknown"].includes(state.state);
+  }
+
   _players() {
-    if (!this._hass) return [];
-    return Object.values(this._hass.states)
-      .filter((state) => state.entity_id.startsWith("media_player."))
+    if (!this._hass || !this._managedTargetsLoaded) return [];
+    return this._managedTargets
+      .map((target) => {
+        const state = this._hass.states[target.entity_id];
+        return state
+          ? { ...state, _ytDlpTarget: target }
+          : { entity_id: target.entity_id, state: "unavailable", attributes: {}, _ytDlpTarget: target };
+      })
       .sort((a, b) => this._friendlyName(a).localeCompare(this._friendlyName(b)));
   }
 
   _configuredPlayers() {
-    const multi = Array.isArray(this._config?.media_players)
-      ? this._config.media_players
-      : (typeof this._config?.media_players === "string" ? [this._config.media_players] : []);
-    const legacy = Array.isArray(this._config?.media_player)
-      ? this._config.media_player
-      : (typeof this._config?.media_player === "string" ? [this._config.media_player] : []);
-    return [...new Set([...multi, ...legacy].filter((entityId) => typeof entityId === "string" && entityId.startsWith("media_player.")))];
+    return this._managedTargets
+      .map((target) => target?.entity_id)
+      .filter((entityId) => typeof entityId === "string" && entityId.startsWith("media_player."));
   }
 
   _targetPlayers() {
-    if (!this._hass) return [];
+    if (!this._hass || !this._managedTargetsLoaded) return [];
+    const allowed = new Set(this._configuredPlayers());
     return [...new Set(this._selectedPlayers)]
-      .filter((entityId) => Boolean(this._hass.states[entityId]));
+      .filter((entityId) => allowed.has(entityId) && this._targetAvailable(entityId));
   }
 
   _setSelectedPlayers(entityIds) {
     const previousPrimary = this._selectedPlayer;
     let valid = [...new Set(entityIds)]
-      .filter((entityId) => typeof entityId === "string" && this._hass?.states?.[entityId]);
+      .filter((entityId) => typeof entityId === "string" && this._configuredPlayers().includes(entityId) && this._targetAvailable(entityId));
     if (!valid.length && this._selectedPlayer && this._hass?.states?.[this._selectedPlayer]) {
       valid = [this._selectedPlayer];
     }
@@ -460,25 +478,31 @@ class YtDlpMediaCard extends HTMLElement {
 
   _speakerSummary() {
     const selected = this._targetPlayers();
-    if (!selected.length) return "Chọn loa";
+    if (!selected.length) return this._managedTargetsLoaded ? "Chọn thiết bị" : "Đang tải thiết bị…";
     if (selected.length === 1) return this._friendlyName(this._hass?.states?.[selected[0]]);
-    return `${this._friendlyName(this._hass?.states?.[selected[0]])} + ${selected.length - 1} loa`;
+    return `${this._friendlyName(this._hass?.states?.[selected[0]])} + ${selected.length - 1} thiết bị`;
   }
 
   _playerSignature(hass) {
-    if (!hass?.states) return "";
-    return Object.values(hass.states)
-      .filter((state) => state.entity_id.startsWith("media_player."))
-      .map((state) => `${state.entity_id}:${state.attributes?.friendly_name || ""}`)
+    if (!hass?.states || !this._managedTargetsLoaded) return "";
+    return this._managedTargets
+      .map((target) => `${target.entity_id}:${target.name}:${target.type}:${hass.states[target.entity_id]?.state || "missing"}`)
       .sort()
       .join("|");
   }
 
   _friendlyName(state) {
-    return state?.attributes?.friendly_name || state?.entity_id || "Media player";
+    const target = this._managedTarget(state?.entity_id);
+    return target?.name || state?.attributes?.friendly_name || state?.entity_id || "Media player";
+  }
+
+  _targetTypeLabel(entityId) {
+    const type = this._managedTarget(entityId)?.type;
+    return ({ speaker: "Loa", dlna: "DLNA", tv: "TV" })[type] || "Thiết bị";
   }
 
   _state() {
+    if (!this._managedTargetsLoaded || !this._configuredPlayers().includes(this._selectedPlayer)) return null;
     return this._hass?.states?.[this._selectedPlayer] || null;
   }
 
@@ -595,7 +619,7 @@ class YtDlpMediaCard extends HTMLElement {
     return `
       <div class="speaker-row">
         <details class="speaker-picker" id="speakerPicker" ${this._speakerPickerOpen ? "open" : ""}>
-          <summary class="field speaker-field" aria-label="Chọn một hoặc nhiều loa">
+          <summary class="field speaker-field" aria-label="Chọn một hoặc nhiều thiết bị phát">
             ${this._icon("speaker-multiple")}
             <span class="speaker-summary">${this._escape(this._speakerSummary())}</span>
             <span class="speaker-count">${this._targetPlayers().length}</span>
@@ -603,20 +627,20 @@ class YtDlpMediaCard extends HTMLElement {
           </summary>
           <div class="speaker-menu">
             <div class="speaker-menu-head">
-              <strong>Phát trên loa</strong>
+              <strong>Thiết bị phát đã cấu hình</strong>
               <div>
                 <button type="button" id="selectAllSpeakers">Tất cả</button>
-                <button type="button" id="clearSpeakers">Chỉ loa chính</button>
-                <button type="button" id="closeSpeakerPicker" class="speaker-close" title="Thu gọn danh sách loa" aria-label="Thu gọn danh sách loa">${this._icon("chevron-up")}<span>Thu gọn</span></button>
+                <button type="button" id="clearSpeakers">Chỉ thiết bị chính</button>
+                <button type="button" id="closeSpeakerPicker" class="speaker-close" title="Thu gọn danh sách thiết bị" aria-label="Thu gọn danh sách thiết bị">${this._icon("chevron-up")}<span>Thu gọn</span></button>
               </div>
             </div>
             <div class="speaker-options">
-              ${players.map((player) => `
+              ${players.length ? players.map((player) => `
                 <label class="speaker-option">
-                  <input type="checkbox" data-speaker-id="${this._escape(player.entity_id)}" ${this._selectedPlayers.includes(player.entity_id) ? "checked" : ""}>
+                  <input type="checkbox" data-speaker-id="${this._escape(player.entity_id)}" ${this._selectedPlayers.includes(player.entity_id) ? "checked" : ""} ${this._targetAvailable(player.entity_id) ? "" : "disabled"}>
                   <span class="speaker-check">${this._icon("check")}</span>
-                  <span class="speaker-name">${this._escape(this._friendlyName(player))}</span>
-                </label>`).join("")}
+                  <span class="speaker-name">${this._escape(this._friendlyName(player))} <small>${this._escape(this._targetTypeLabel(player.entity_id))}</small></span>
+                </label>`).join("") : `<div class="speaker-empty">${this._managedTargetsLoaded ? "Chưa có thiết bị. Hãy thêm loa/tivi trong cấu hình tích hợp YouTube-DLP." : "Đang tải danh sách thiết bị…"}</div>`}
             </div>
           </div>
         </details>
@@ -1380,6 +1404,38 @@ class YtDlpMediaCard extends HTMLElement {
     });
   }
 
+  async _loadManagedTargets() {
+    if (!this._hass || this._managedTargetsLoading) return;
+    this._managedTargetsLoading = true;
+    try {
+      const response = await this._callServiceResponse("yt_dlp", "get_media_targets");
+      const targets = Array.isArray(response?.targets) ? response.targets : [];
+      this._managedTargets = targets.filter((target) =>
+        target && typeof target.entity_id === "string" && target.entity_id.startsWith("media_player.")
+        && ["speaker", "dlna", "tv"].includes(target.type)
+      );
+      this._managedTargetsLoaded = true;
+      this._managedTargetsLoadedAt = Date.now();
+      this._managedTargetsRetryAt = 0;
+
+      const allowed = new Set(this._configuredPlayers());
+      this._selectedPlayers = this._selectedPlayers.filter((entityId) => allowed.has(entityId) && this._targetAvailable(entityId));
+      if (!this._selectedPlayers.length) {
+        const candidates = this._managedTargets.map((target) => target.entity_id).filter((entityId) => this._targetAvailable(entityId));
+        const active = candidates.find((entityId) => ["playing", "paused", "buffering"].includes(this._hass.states[entityId]?.state));
+        this._selectedPlayers = active ? [active] : (candidates[0] ? [candidates[0]] : []);
+      }
+      this._selectedPlayer = this._selectedPlayers[0] || "";
+      this._persistSpeakerSelection();
+      this._speakerSelectionRestored = true;
+      this._render();
+    } catch (_error) {
+      this._managedTargetsRetryAt = Date.now() + 15000;
+    } finally {
+      this._managedTargetsLoading = false;
+    }
+  }
+
   async _callServiceResponse(domain, service, serviceData = {}, target = undefined) {
     if (!this._hass) throw new Error("Home Assistant chưa sẵn sàng");
     const message = {
@@ -1397,7 +1453,7 @@ class YtDlpMediaCard extends HTMLElement {
   async _playUrl() {
     const url = this._youtubeUrl.trim();
     if (!url) return this._notify("Hãy nhập link YouTube.");
-    if (!this._selectedPlayer) return this._notify("Hãy chọn loa trước khi phát.");
+    if (!this._selectedPlayer) return this._notify("Hãy chọn thiết bị phát trước khi phát.");
 
     const selectedPlayers = this._targetPlayers();
     this._queue = null;
@@ -1413,12 +1469,12 @@ class YtDlpMediaCard extends HTMLElement {
             url,
             media_player: this._selectedPlayer,
           });
-      this._nowPlaying = response || { title: "YouTube audio", url };
+      this._nowPlaying = response || { title: "YouTube", url };
       this._activePlayback = { kind: "url", url };
       this._currentLibraryIndex = -1;
       this._currentFavoriteIndex = -1;
-      const targetText = selectedPlayers.length > 1 ? ` trên ${selectedPlayers.length} loa` : "";
-      this._notify(`Đang phát${targetText}: ${response?.title || "YouTube audio"}`);
+      const targetText = selectedPlayers.length > 1 ? ` trên ${selectedPlayers.length} thiết bị` : "";
+      this._notify(`Đang phát${targetText}: ${response?.title || "YouTube"}`);
     } catch (error) {
       this._notify(`Không thể phát: ${error?.message || error}`);
     } finally {
@@ -1668,7 +1724,7 @@ class YtDlpMediaCard extends HTMLElement {
   }
 
   async _startQueue(kind) {
-    if (!this._selectedPlayer) return this._notify("Hãy chọn loa trước khi phát.");
+    if (!this._selectedPlayer) return this._notify("Hãy chọn thiết bị phát trước khi phát.");
     const queue = kind === "online"
       ? this._favorites.filter((item) => this._onlineSelected.has(item.url)).map((item) => item.url)
       : this._library.filter((item) => this._offlineSelected.has(item.id)).map((item) => item.id);
@@ -1824,11 +1880,11 @@ class YtDlpMediaCard extends HTMLElement {
 
   async _seekInterruptedPosition(interrupted) {
     if (!(await this._waitForPlaybackStart())) {
-      throw new Error("Loa chưa sẵn sàng để khôi phục vị trí phát");
+      throw new Error("Thiết bị chưa sẵn sàng để khôi phục vị trí phát");
     }
     const seekPosition = Math.max(0, Number(interrupted?.position) || 0);
     const selectedPlayers = this._targetPlayers();
-    if (!selectedPlayers.length || !this._hass) throw new Error("Không tìm thấy loa để khôi phục nhạc");
+    if (!selectedPlayers.length || !this._hass) throw new Error("Không tìm thấy thiết bị để khôi phục nhạc");
     let lastError = null;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
@@ -2031,7 +2087,7 @@ class YtDlpMediaCard extends HTMLElement {
 
   async _stopPlayback() {
     if (!this._hass) return;
-    if (!this._selectedPlayer) return this._notify("Chưa có loa được chọn.");
+    if (!this._selectedPlayer) return this._notify("Chưa có thiết bị phát được chọn.");
     this._queueStopRequested = true;
     this._queue = null;
     this._queueAdvancing = false;
@@ -2250,7 +2306,7 @@ class YtDlpMediaCard extends HTMLElement {
       header{justify-content:space-between;gap:12px;min-width:0}.brand{gap:12px;min-width:0}.brand>div:last-child{min-width:0}.brand-icon{width:44px;height:44px;flex:0 0 44px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 8px 24px color-mix(in srgb,var(--accent) 30%,transparent)}.brand-icon ha-icon{--mdc-icon-size:26px}.eyebrow{font-size:clamp(8px,2.2cqi,10px);font-weight:800;letter-spacing:.16em;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brand-title{font-size:clamp(15px,4cqi,18px);font-weight:800;letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.activity-badge{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:5px;height:28px;padding:0 9px 0 8px;border:1px solid transparent;border-radius:9px;font-size:9.5px;font-weight:800;line-height:1;letter-spacing:.005em;white-space:nowrap}.activity-badge span{display:block}.activity-badge ha-icon{--mdc-icon-size:14px}.activity-badge.playing,.activity-badge.downloading{color:#20b879;border-color:color-mix(in srgb,#20b879 24%,transparent);background:color-mix(in srgb,#20b879 9%,var(--card-bg));box-shadow:0 4px 12px color-mix(in srgb,#20b879 8%,transparent)}.activity-badge.paused{color:color-mix(in srgb,var(--accent) 82%,var(--text));border-color:color-mix(in srgb,var(--accent) 22%,transparent);background:color-mix(in srgb,var(--accent) 8%,var(--card-bg))}.activity-badge.downloading ha-icon{animation:downloadFloat 1.25s ease-in-out infinite}
       .download-notice{gap:11px;margin-top:16px;padding:12px 13px;border-radius:16px;border:1px solid var(--border);animation:noticeIn .25s ease}.download-notice.success{background:color-mix(in srgb,#28b77c 12%,var(--card-bg));border-color:color-mix(in srgb,#28b77c 34%,transparent)}.download-notice.error{background:color-mix(in srgb,#e84c5b 11%,var(--card-bg));border-color:color-mix(in srgb,#e84c5b 34%,transparent)}.notice-icon{width:36px;height:36px;flex:0 0 36px;border-radius:12px;display:grid;place-items:center;background:var(--surface)}.success .notice-icon{color:#159b63}.error .notice-icon{color:#d63e50}.notice-icon ha-icon{--mdc-icon-size:21px}.notice-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}.notice-copy strong{font-size:12px}.notice-copy span{font-size:10px;color:var(--muted);line-height:1.35;overflow-wrap:anywhere}.notice-close{width:30px;height:30px;border:0;border-radius:9px;background:transparent;color:var(--muted);cursor:pointer;display:grid;place-items:center}.notice-close:hover{background:var(--surface);color:var(--text)}.notice-close ha-icon{--mdc-icon-size:17px}
       .primary-tabs{gap:8px;margin-top:18px;padding:6px;border-radius:18px;background:var(--surface-soft);border:1px solid var(--border-soft)}.primary-tabs button{position:relative;flex:1;height:48px;border:0;border-radius:13px;background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;font-size:12px;font-weight:850;letter-spacing:.01em;transition:background .18s ease,color .18s ease,transform .18s ease,box-shadow .18s ease}.primary-tabs button:hover{color:var(--text);background:var(--surface)}.primary-tabs button.active{color:#fff;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 68%,var(--accent)));box-shadow:0 8px 22px color-mix(in srgb,var(--accent) 18%,transparent)}.primary-tabs ha-icon{--mdc-icon-size:21px}.primary-tabs b{font-size:8px;min-width:18px;height:18px;padding:0 5px;border-radius:999px;display:grid;place-items:center;background:color-mix(in srgb,currentColor 14%,transparent)}.primary-tabs .tab-pulse{position:absolute;right:12px;top:10px}
-      .speaker-row{position:relative;margin-top:18px;z-index:12}.field{width:100%;height:46px;gap:10px;padding:0 14px;border-radius:15px;border:1px solid var(--border);background:var(--surface-soft)}.field>ha-icon{color:var(--muted);--mdc-icon-size:20px}.field select{appearance:none;flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font-weight:650}.field select option,.input-shell select option{background:var(--card-bg);color:var(--text)}.speaker-picker{position:relative;width:100%}.speaker-picker>summary{box-sizing:border-box;display:flex;align-items:center;cursor:pointer;list-style:none;user-select:none}.speaker-picker>summary::-webkit-details-marker{display:none}.speaker-summary{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:12px;font-weight:700}.speaker-count{min-width:22px;height:22px;padding:0 6px;border-radius:999px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 14%,var(--card-bg));color:color-mix(in srgb,var(--accent) 78%,var(--text));font-size:9px;font-weight:850}.speaker-picker[open] .speaker-field{border-color:color-mix(in srgb,var(--accent) 42%,var(--border));box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 9%,transparent)}.speaker-picker[open] .speaker-field>ha-icon:last-child{transform:rotate(180deg)}.speaker-field>ha-icon:last-child{transition:transform .18s ease}.speaker-menu{position:absolute;left:0;right:0;top:calc(100% + 7px);z-index:30;padding:10px;border:1px solid var(--border);border-radius:15px;background:var(--card-bg);box-shadow:0 16px 38px rgba(0,0,0,.24)}.speaker-menu-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 3px 8px}.speaker-menu-head strong{font-size:10px;white-space:nowrap}.speaker-menu-head>div{display:flex;gap:5px;min-width:0}.speaker-menu-head button{height:29px;padding:0 8px;border:1px solid var(--border-soft);border-radius:8px;background:var(--surface-soft);color:var(--muted);font-size:9px;font-weight:750;cursor:pointer;white-space:nowrap}.speaker-menu-head button:hover{color:var(--text);background:var(--surface)}.speaker-menu-head .speaker-close{display:flex;align-items:center;justify-content:center;gap:3px}.speaker-close ha-icon{--mdc-icon-size:14px}.speaker-options{max-height:230px;overflow:auto;overscroll-behavior:contain}.speaker-option{position:relative;display:flex;align-items:center;gap:9px;min-height:39px;padding:5px 7px;border-radius:10px;cursor:pointer}.speaker-option:hover{background:var(--surface-soft)}.speaker-option input{position:absolute;opacity:0;pointer-events:none}.speaker-check{width:23px;height:23px;flex:0 0 23px;border:1px solid var(--border);border-radius:7px;display:grid;place-items:center;background:var(--surface-soft);color:transparent}.speaker-check ha-icon{--mdc-icon-size:15px}.speaker-option input:checked+.speaker-check{border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}.speaker-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:650;color:var(--text)}
+      .speaker-row{position:relative;margin-top:18px;z-index:12}.field{width:100%;height:46px;gap:10px;padding:0 14px;border-radius:15px;border:1px solid var(--border);background:var(--surface-soft)}.field>ha-icon{color:var(--muted);--mdc-icon-size:20px}.field select{appearance:none;flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font-weight:650}.field select option,.input-shell select option{background:var(--card-bg);color:var(--text)}.speaker-picker{position:relative;width:100%}.speaker-picker>summary{box-sizing:border-box;display:flex;align-items:center;cursor:pointer;list-style:none;user-select:none}.speaker-picker>summary::-webkit-details-marker{display:none}.speaker-summary{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:12px;font-weight:700}.speaker-count{min-width:22px;height:22px;padding:0 6px;border-radius:999px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 14%,var(--card-bg));color:color-mix(in srgb,var(--accent) 78%,var(--text));font-size:9px;font-weight:850}.speaker-picker[open] .speaker-field{border-color:color-mix(in srgb,var(--accent) 42%,var(--border));box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 9%,transparent)}.speaker-picker[open] .speaker-field>ha-icon:last-child{transform:rotate(180deg)}.speaker-field>ha-icon:last-child{transition:transform .18s ease}.speaker-menu{position:absolute;left:0;right:0;top:calc(100% + 7px);z-index:30;padding:10px;border:1px solid var(--border);border-radius:15px;background:var(--card-bg);box-shadow:0 16px 38px rgba(0,0,0,.24)}.speaker-menu-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 3px 8px}.speaker-menu-head strong{font-size:10px;white-space:nowrap}.speaker-menu-head>div{display:flex;gap:5px;min-width:0}.speaker-menu-head button{height:29px;padding:0 8px;border:1px solid var(--border-soft);border-radius:8px;background:var(--surface-soft);color:var(--muted);font-size:9px;font-weight:750;cursor:pointer;white-space:nowrap}.speaker-menu-head button:hover{color:var(--text);background:var(--surface)}.speaker-menu-head .speaker-close{display:flex;align-items:center;justify-content:center;gap:3px}.speaker-close ha-icon{--mdc-icon-size:14px}.speaker-options{max-height:230px;overflow:auto;overscroll-behavior:contain}.speaker-option{position:relative;display:flex;align-items:center;gap:9px;min-height:39px;padding:5px 7px;border-radius:10px;cursor:pointer}.speaker-option:hover{background:var(--surface-soft)}.speaker-option input{position:absolute;opacity:0;pointer-events:none}.speaker-check{width:23px;height:23px;flex:0 0 23px;border:1px solid var(--border);border-radius:7px;display:grid;place-items:center;background:var(--surface-soft);color:transparent}.speaker-check ha-icon{--mdc-icon-size:15px}.speaker-option input:checked+.speaker-check{border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}.speaker-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:650;color:var(--text)}.speaker-name small{margin-left:6px;padding:2px 6px;border-radius:999px;background:var(--surface);color:var(--muted);font-size:8px;font-weight:800;letter-spacing:.04em}.speaker-empty{padding:12px 8px;color:var(--muted);font-size:10px;line-height:1.45}
       .now-playing{gap:20px;padding:24px 2px 18px}.art-wrap{position:relative;width:118px;height:118px;flex:0 0 118px;border-radius:28px;padding:4px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 78%,#fff),var(--accent2));box-shadow:0 14px 34px rgba(0,0,0,.2)}.art-wrap.pulse:after{content:"";position:absolute;inset:-7px;border-radius:34px;border:1px solid color-mix(in srgb,var(--accent2) 55%,transparent);animation:ring 2.3s ease-out infinite}.art{width:100%;height:100%;display:grid;place-items:center;border-radius:24px;background:var(--surface-strong);background-size:cover;background-position:center;overflow:hidden}.art>ha-icon{--mdc-icon-size:48px;color:var(--muted)}.track-info{min-width:0;flex:1}.track-title{font-size:24px;font-weight:850;line-height:1.12;letter-spacing:-.035em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.track-subtitle{margin-top:8px;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .transport{padding:4px 2px 8px}.progress-head{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums;margin-bottom:5px}.range{appearance:none;width:100%;height:4px;border-radius:999px;outline:none;background:linear-gradient(90deg,var(--accent) 0 var(--value,0%),var(--surface-strong) var(--value,0%) 100%)}.range::-webkit-slider-thumb{appearance:none;width:14px;height:14px;border-radius:50%;background:var(--text);box-shadow:0 2px 8px rgba(0,0,0,.25);cursor:pointer}.range::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:var(--text);cursor:pointer}.progress{height:5px}.controls{justify-content:center;gap:13px;margin:18px 0 16px}.icon-btn,.play-btn,.soft-btn{border:0;cursor:pointer;display:grid;place-items:center;transition:transform .18s ease,background .18s ease,opacity .18s ease}.icon-btn{width:43px;height:43px;border-radius:50%;background:var(--surface)}.icon-btn:hover,.soft-btn:hover{background:var(--surface-strong);transform:translateY(-1px)}.play-btn{width:62px;height:62px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 10px 28px color-mix(in srgb,var(--accent) 34%,transparent)}.play-btn:hover{transform:scale(1.045)}.play-btn ha-icon{--mdc-icon-size:31px}.busy ha-icon,.spinning ha-icon{animation:spin 1s linear infinite}.volume-row{gap:10px;color:var(--muted)}.volume-row ha-icon{--mdc-icon-size:18px}.volume-row .range{flex:1}.volume-row span{width:36px;text-align:right;font-size:10px;font-variant-numeric:tabular-nums}
       .tabs{gap:7px;margin:16px 0 12px;padding:5px;border-radius:15px;background:var(--surface-soft);border:1px solid var(--border-soft)}.tabs button{position:relative;flex:1;height:38px;border:0;border-radius:11px;background:transparent;color:var(--muted);font-size:12px;font-weight:750;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;min-width:0}.tabs button.active{background:var(--surface-strong);color:var(--text);box-shadow:0 4px 12px rgba(0,0,0,.07)}.tabs ha-icon{--mdc-icon-size:18px}.tabs b{font-size:9px;padding:2px 6px;border-radius:9px;background:var(--surface-strong)}.tab-pulse{width:6px;height:6px;border-radius:50%;background:#34c88a;box-shadow:0 0 10px rgba(52,200,138,.65);animation:pulseDot 1.3s ease-in-out infinite}
