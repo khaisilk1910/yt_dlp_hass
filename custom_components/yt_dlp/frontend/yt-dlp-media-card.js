@@ -1459,6 +1459,29 @@ class YtDlpMediaCard extends HTMLElement {
     return result?.response ?? result;
   }
 
+  _targetType(entityId) {
+    return this._managedTargets.find((target) => target.entity_id === entityId)?.type || "speaker";
+  }
+
+  async _playConfiguredUrl(url, selectedPlayers = this._targetPlayers()) {
+    if (!selectedPlayers.length) throw new Error("Chưa chọn thiết bị phát");
+    const hasTv = selectedPlayers.some((entityId) => this._targetType(entityId) === "tv");
+
+    // Speaker + DLNA use the untouched v0.5.16 play/play_multi services. TV is
+    // intentionally isolated behind play_targets so TV-specific code can never
+    // break the protected audio/download core.
+    if (!hasTv) {
+      return selectedPlayers.length > 1
+        ? this._callServiceResponse("yt_dlp", "play_multi", { url, media_players: selectedPlayers })
+        : this._callServiceResponse("yt_dlp", "play", { url, media_player: selectedPlayers[0] });
+    }
+
+    return this._callServiceResponse("yt_dlp", "play_targets", {
+      url,
+      media_players: selectedPlayers,
+    });
+  }
+
   async _playUrl() {
     const url = this._youtubeUrl.trim();
     if (!url) return this._notify("Hãy nhập link YouTube.");
@@ -1469,15 +1492,7 @@ class YtDlpMediaCard extends HTMLElement {
     this._busy = true;
     this._render();
     try {
-      const response = selectedPlayers.length > 1
-        ? await this._callServiceResponse("yt_dlp", "play_multi", {
-            url,
-            media_players: selectedPlayers,
-          })
-        : await this._callServiceResponse("yt_dlp", "play", {
-            url,
-            media_player: this._selectedPlayer,
-          });
+      const response = await this._playConfiguredUrl(url, selectedPlayers);
       this._nowPlaying = response || { title: "YouTube", url };
       this._activePlayback = { kind: "url", url };
       this._currentLibraryIndex = -1;
@@ -1947,9 +1962,7 @@ class YtDlpMediaCard extends HTMLElement {
         } else {
           const selectedPlayers = this._targetPlayers();
           if (!source.url || !selectedPlayers.length) return;
-          const response = selectedPlayers.length > 1
-            ? await this._callServiceResponse("yt_dlp", "play_multi", { url: source.url, media_players: selectedPlayers })
-            : await this._callServiceResponse("yt_dlp", "play", { url: source.url, media_player: this._selectedPlayer });
+          const response = await this._playConfiguredUrl(source.url, selectedPlayers);
           this._nowPlaying = response || this._nowPlaying || { title: "YouTube audio", url: source.url };
           this._activePlayback = { kind: "online", url: source.url };
         }
@@ -1963,9 +1976,7 @@ class YtDlpMediaCard extends HTMLElement {
         this._busy = true;
         this._render();
         try {
-          const response = selectedPlayers.length > 1
-            ? await this._callServiceResponse("yt_dlp", "play_multi", { url: source.url, media_players: selectedPlayers })
-            : await this._callServiceResponse("yt_dlp", "play", { url: source.url, media_player: this._selectedPlayer });
+          const response = await this._playConfiguredUrl(source.url, selectedPlayers);
           this._nowPlaying = response || this._nowPlaying || { title: "YouTube audio", url: source.url };
           this._activePlayback = { kind: "url", url: source.url };
         } finally {
