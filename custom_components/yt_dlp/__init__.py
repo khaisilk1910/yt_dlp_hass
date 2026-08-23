@@ -62,6 +62,20 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async_register_download_services(hass)
     async_register_play_services(hass)
 
+    # Managed targets / TV video are additive. Register them only after the
+    # protected v0.5.16 download/play services are already live. Any import or
+    # API incompatibility here is isolated and cannot remove core services.
+    try:
+        from .target_services import async_register_target_services
+        from .tv_playback import YoutubeDlpTvStreamView
+
+        async_register_target_services(hass)
+        hass.http.register_view(YoutubeDlpTvStreamView())
+    except Exception:  # noqa: BLE001 - optional target layer isolation
+        _LOGGER.exception(
+            "Managed target/TV services failed to load; v0.5.16 core remains available"
+        )
+
     # DLNA is additive. Never allow an HTTP-view/API compatibility issue to
     # take down the protected play/download services.
     try:

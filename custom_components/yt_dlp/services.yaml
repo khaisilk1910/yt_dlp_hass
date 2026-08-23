@@ -287,3 +287,18 @@ favorites_playback_stop:
 
 get_media_targets:
   fields: {}
+
+play_targets:
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+          type: url
+    media_players:
+      required: true
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: media_player

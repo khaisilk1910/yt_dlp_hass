@@ -8,6 +8,12 @@ from __future__ import annotations
 
 import voluptuous as vol
 
+from homeassistant.components.media_player import (
+    ATTR_MEDIA_CONTENT_ID,
+    ATTR_MEDIA_CONTENT_TYPE,
+    ATTR_MEDIA_EXTRA,
+    SERVICE_PLAY_MEDIA,
+)
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
@@ -21,11 +27,8 @@ from .const import (
     SERVICE_PLAY,
     SERVICE_PLAY_MULTI,
     SERVICE_SCAN_LIBRARY,
-    SERVICE_GET_MEDIA_TARGETS,
 )
 from .play_runtime import get_playback_manager
-from .media_targets import configured_media_targets
-from .target_playback import async_play_url_on_targets
 from .service_validation import http_url, media_player_entities, media_player_entity
 
 PLAY_SCHEMA = vol.Schema(
@@ -43,7 +46,6 @@ PLAY_MULTI_SCHEMA = vol.Schema(
 )
 
 SCAN_LIBRARY_SCHEMA = vol.Schema({vol.Optional(ATTR_FORCE, default=False): cv.boolean})
-GET_MEDIA_TARGETS_SCHEMA = vol.Schema({})
 
 
 def async_register_play_services(hass: HomeAssistant) -> None:
@@ -53,16 +55,28 @@ def async_register_play_services(hass: HomeAssistant) -> None:
         playback = get_playback_manager(hass)
         entity_id = call.data[ATTR_MEDIA_PLAYER]
         try:
-            info, results = await async_play_url_on_targets(
-                hass,
-                playback,
-                call.data[ATTR_URL],
-                [entity_id],
+            info, media_source_id = await playback.async_create_stream(call.data[ATTR_URL])
+            metadata: dict[str, object] = {"title": info.title}
+            if info.artist:
+                metadata["artist"] = info.artist
+            if info.thumbnail:
+                metadata["images"] = [{"url": info.thumbnail}]
+
+            await hass.services.async_call(
+                "media_player",
+                SERVICE_PLAY_MEDIA,
+                service_data={
+                    ATTR_MEDIA_CONTENT_ID: media_source_id,
+                    ATTR_MEDIA_CONTENT_TYPE: info.mime_type,
+                    ATTR_MEDIA_EXTRA: {"metadata": metadata},
+                },
+                target={"entity_id": entity_id},
+                blocking=True,
                 context=call.context,
             )
-            result = results[0] if results else None
-            if result is None or not result.success:
-                raise RuntimeError(result.error if result else "Playback target returned no result")
+            playback.async_track_remote_playback(
+                entity_id, call.data[ATTR_URL], info, media_source_id
+            )
         except HomeAssistantError:
             raise
         except Exception as err:
@@ -72,30 +86,36 @@ def async_register_play_services(hass: HomeAssistant) -> None:
                 translation_placeholders={"error": str(err)},
             ) from err
 
-        response: dict[str, object] = {
-            "media_player": entity_id,
-            "target": result.as_dict(),
-            "url": call.data[ATTR_URL],
-        }
-        if info is not None:
-            response.update(info.as_dict())
+        response = {"media_player": entity_id, **info.as_dict()}
         return response if call.return_response else None
 
     async def async_play_multi(call: ServiceCall) -> ServiceResponse | None:
         playback = get_playback_manager(hass)
         entity_ids = call.data[ATTR_MEDIA_PLAYERS]
         try:
-            info, results = await async_play_url_on_targets(
-                hass,
-                playback,
-                call.data[ATTR_URL],
-                list(entity_ids),
+            info, media_source_id = await playback.async_create_stream(call.data[ATTR_URL])
+            metadata: dict[str, object] = {"title": info.title}
+            if info.artist:
+                metadata["artist"] = info.artist
+            if info.thumbnail:
+                metadata["images"] = [{"url": info.thumbnail}]
+
+            await hass.services.async_call(
+                "media_player",
+                SERVICE_PLAY_MEDIA,
+                service_data={
+                    ATTR_MEDIA_CONTENT_ID: media_source_id,
+                    ATTR_MEDIA_CONTENT_TYPE: info.mime_type,
+                    ATTR_MEDIA_EXTRA: {"metadata": metadata},
+                },
+                target={"entity_id": entity_ids},
+                blocking=True,
                 context=call.context,
             )
-            successes = [result for result in results if result.success]
-            if not successes:
-                errors = "; ".join(result.error or result.entity_id for result in results)
-                raise RuntimeError(errors or "No playback target succeeded")
+            for entity_id in entity_ids:
+                playback.async_track_remote_playback(
+                    entity_id, call.data[ATTR_URL], info, media_source_id
+                )
         except HomeAssistantError:
             raise
         except Exception as err:
@@ -105,16 +125,11 @@ def async_register_play_services(hass: HomeAssistant) -> None:
                 translation_placeholders={"error": str(err)},
             ) from err
 
-        response: dict[str, object] = {
+        response = {
             "media_players": entity_ids,
             "player_count": len(entity_ids),
-            "success_count": len(successes),
-            "failed_count": len(results) - len(successes),
-            "targets": [result.as_dict() for result in results],
-            "url": call.data[ATTR_URL],
+            **info.as_dict(),
         }
-        if info is not None:
-            response.update(info.as_dict())
         return response if call.return_response else None
 
     async def async_scan_library(call: ServiceCall) -> ServiceResponse:
@@ -133,14 +148,6 @@ def async_register_play_services(hass: HomeAssistant) -> None:
             "items": items,
         }
 
-    async def async_get_media_targets(call: ServiceCall) -> ServiceResponse:
-        """Return only user-managed targets; this performs no network discovery."""
-        targets = configured_media_targets(hass)
-        return {
-            "count": len(targets),
-            "targets": [target.as_dict() for target in targets],
-        }
-
     hass.services.async_register(
         DOMAIN,
         SERVICE_PLAY,
@@ -154,13 +161,6 @@ def async_register_play_services(hass: HomeAssistant) -> None:
         async_play_multi,
         schema=PLAY_MULTI_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_GET_MEDIA_TARGETS,
-        async_get_media_targets,
-        schema=GET_MEDIA_TARGETS_SCHEMA,
-        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,

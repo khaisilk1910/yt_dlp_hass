@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
-VERSION = "0.5.18"
+VERSION = "0.5.19"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 STATE_FAVORITES_PLAYBACK = f"{DOMAIN}.favorites_playback"
@@ -16,6 +16,8 @@ SERVICE_SEARCH = "search"
 SERVICE_PLAY = "play"
 SERVICE_PLAY_MULTI = "play_multi"
 SERVICE_SCAN_LIBRARY = "scan_library"
+SERVICE_GET_MEDIA_TARGETS = "get_media_targets"
+SERVICE_PLAY_TARGETS = "play_targets"
 SERVICE_FAVORITES_LIST = "favorites_list"
 SERVICE_FAVORITES_ADD = "favorites_add"
 SERVICE_FAVORITES_REMOVE = "favorites_remove"
@@ -63,9 +65,6 @@ DEFAULT_AUDIO_FORMAT = "mp3"
 DEFAULT_AUDIO_QUALITY = "best"
 DEFAULT_SEARCH_LIMIT = 10
 CONF_MEDIA_LIBRARY_PATH = "media_library_path"
-
-# User-managed Home Assistant playback targets. These are options-only and are
-# read from HA's in-memory entity state, so they never add startup network I/O.
 CONF_MEDIA_TARGETS = "media_targets"
 CONF_TARGET_ENTITY_ID = "entity_id"
 CONF_TARGET_NAME = "name"
@@ -74,7 +73,6 @@ TARGET_TYPE_SPEAKER = "speaker"
 TARGET_TYPE_DLNA = "dlna"
 TARGET_TYPE_TV = "tv"
 TARGET_TYPES = (TARGET_TYPE_SPEAKER, TARGET_TYPE_DLNA, TARGET_TYPE_TV)
-SERVICE_GET_MEDIA_TARGETS = "get_media_targets"
 MAX_SEARCH_LIMIT = 50
 
 DEFAULT_FILENAME_TEMPLATE = "%(title).180B [%(id)s].%(ext)s"
