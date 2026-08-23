@@ -27,12 +27,21 @@
       "mobile_action_required": "Hãy chọn thiết bị Companion App trước khi bật thông báo lên điện thoại.",
       "mobile_action_unavailable": "Thiết bị thông báo đã chọn hiện không còn được đăng ký. Hãy mở lại màn hình này và chọn một thiết bị đang khả dụng.",
       "zalo_fields_required": "Thông báo Zalo cần nhập đủ Thread ID và Zalo account.",
-      "cannot_create_folder": "Không thể tạo thư mục tải xuống hoặc thư mục không có quyền ghi."
+      "cannot_create_folder": "Không thể tạo thư mục tải xuống hoặc thư mục không có quyền ghi.",
+      "target_already_configured": "Thiết bị này đã được thêm.",
+      "target_unavailable": "Không tìm thấy media player này trong Home Assistant."
     },
     "step": {
       "init": {
         "title": "Cài đặt YouTube-DLP",
-        "description": "Quản lý thư mục tải xuống/thư viện nhạc và nơi nhận thông báo sau khi tải thành công. Chỉ khi thay đổi thư mục thì riêng tích hợp này mới được reload; thay đổi thông báo được áp dụng ngay mà không cần reload.",
+        "menu_options": {
+          "settings": "Thư mục và thông báo",
+          "media_targets": "Loa và tivi"
+        }
+      },
+      "settings": {
+        "title": "Thư mục và thông báo",
+        "description": "Quản lý thư mục tải xuống/thư viện và thông báo. Chỉ thay đổi thư mục mới reload tích hợp.",
         "sections": {
           "folders": {
             "name": "Thư mục media",
@@ -85,7 +94,46 @@
             }
           }
         }
+      },
+      "media_targets": {
+        "title": "Loa và tivi",
+        "description": "Đã cấu hình {configured_count} thiết bị:\n{configured_targets}",
+        "menu_options": {
+          "add_media_target": "Thêm thiết bị",
+          "edit_media_target": "Đổi tên / phân loại",
+          "remove_media_target": "Xóa thiết bị"
+        }
+      },
+      "add_media_target": {
+        "title": "Thêm loa hoặc tivi",
+        "description": "Chọn media player mà Home Assistant đã có.",
+        "data": {
+          "entity_id": "Thiết bị"
+        }
+      },
+      "media_target_details": {
+        "title": "Tên và loại thiết bị",
+        "description": "Entity: {entity_id}. Phân loại này quyết định phương thức phát.",
+        "data": {
+          "name": "Tên hiển thị",
+          "type": "Loại thiết bị"
+        }
+      },
+      "edit_media_target": {
+        "title": "Sửa thiết bị",
+        "data": {
+          "entity_id": "Thiết bị"
+        }
+      },
+      "remove_media_target": {
+        "title": "Xóa thiết bị",
+        "data": {
+          "entity_id": "Thiết bị"
+        }
       }
+    },
+    "abort": {
+      "no_media_targets_available": "Không còn media player nào của Home Assistant để thêm."
     }
   },
   "services": {
@@ -214,8 +262,8 @@
       }
     },
     "play": {
-      "name": "Phát YouTube ra loa",
-      "description": "Dùng yt-dlp lấy luồng âm thanh trực tiếp rồi phát ngay trên media player đã chọn, không tải file xuống.",
+      "name": "Phát YouTube lên thiết bị",
+      "description": "Tự chọn phương thức phát theo loại thiết bị đã cấu hình: audio cho loa, MP3 tương thích cho DLNA, video cho tivi.",
       "fields": {
         "url": {
           "name": "Link",
@@ -261,6 +309,11 @@
           "description": "URL chuẩn của bài đã lưu cần xóa."
         }
       }
+    },
+    "get_media_targets": {
+      "name": "Lấy danh sách thiết bị phát",
+      "description": "Trả về các loa/DLNA/tivi mà người dùng đã thêm trong cấu hình tích hợp.",
+      "fields": {}
     }
   },
   "exceptions": {
@@ -297,6 +350,13 @@
       "options": {
         "user": "User",
         "group": "Group"
+      }
+    },
+    "target_type": {
+      "options": {
+        "speaker": "Loa thường",
+        "dlna": "Loa DLNA",
+        "tv": "Tivi"
       }
     }
   }

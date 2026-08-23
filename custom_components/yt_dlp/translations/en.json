@@ -27,12 +27,21 @@
       "mobile_action_required": "Enable a mobile notification only after selecting a Companion App notification target.",
       "mobile_action_unavailable": "The selected mobile notification target is no longer registered. Reopen this screen and select an available device.",
       "zalo_fields_required": "Zalo notifications require both Thread ID and Zalo account.",
-      "cannot_create_folder": "The download folder cannot be created or is not writable."
+      "cannot_create_folder": "The download folder cannot be created or is not writable.",
+      "target_already_configured": "This playback target is already configured.",
+      "target_unavailable": "This media player is not currently known to Home Assistant."
     },
     "step": {
       "init": {
         "title": "YouTube-DLP settings",
-        "description": "Manage download/library folders and choose where YouTube-DLP sends a message after a download finishes successfully. Folder changes reload only this integration; notification-only changes are applied without a reload.",
+        "menu_options": {
+          "settings": "Folders and notifications",
+          "media_targets": "Speakers and TVs"
+        }
+      },
+      "settings": {
+        "title": "Folders and notifications",
+        "description": "Manage download/library folders and notifications. Only folder changes reload the integration.",
         "sections": {
           "folders": {
             "name": "Media folders",
@@ -85,7 +94,46 @@
             }
           }
         }
+      },
+      "media_targets": {
+        "title": "Speakers and TVs",
+        "description": "Configured targets: {configured_count}\n{configured_targets}",
+        "menu_options": {
+          "add_media_target": "Add target",
+          "edit_media_target": "Rename / classify target",
+          "remove_media_target": "Remove target"
+        }
+      },
+      "add_media_target": {
+        "title": "Add speaker or TV",
+        "description": "Choose a media player already known to Home Assistant.",
+        "data": {
+          "entity_id": "Media player"
+        }
+      },
+      "media_target_details": {
+        "title": "Target name and type",
+        "description": "Entity: {entity_id}. This classification determines the playback method.",
+        "data": {
+          "name": "Display name",
+          "type": "Target type"
+        }
+      },
+      "edit_media_target": {
+        "title": "Edit target",
+        "data": {
+          "entity_id": "Target"
+        }
+      },
+      "remove_media_target": {
+        "title": "Remove target",
+        "data": {
+          "entity_id": "Target"
+        }
       }
+    },
+    "abort": {
+      "no_media_targets_available": "There are no remaining Home Assistant media players to add."
     }
   },
   "services": {
@@ -214,8 +262,8 @@
       }
     },
     "play": {
-      "name": "Play YouTube on speaker",
-      "description": "Resolves a direct audio stream with yt-dlp and immediately plays it on the selected Home Assistant media player without downloading a file.",
+      "name": "Play YouTube on target",
+      "description": "Chooses the playback method from the configured target type: audio for speakers, DLNA-compatible audio for DLNA, and video for TVs.",
       "fields": {
         "url": {
           "name": "URL",
@@ -261,6 +309,11 @@
           "description": "Canonical saved URL to remove."
         }
       }
+    },
+    "get_media_targets": {
+      "name": "Get playback targets",
+      "description": "Returns the speakers, DLNA renderers and TVs selected in the integration options.",
+      "fields": {}
     }
   },
   "exceptions": {
@@ -297,6 +350,13 @@
       "options": {
         "user": "User",
         "group": "Group"
+      }
+    },
+    "target_type": {
+      "options": {
+        "speaker": "Regular speaker",
+        "dlna": "DLNA speaker",
+        "tv": "TV"
       }
     }
   }
