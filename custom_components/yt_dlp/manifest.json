@@ -17,7 +17,7 @@
     "yt-dlp-ejs==0.8.0"
   ],
   "single_config_entry": true,
-  "version": "0.5.24",
+  "version": "0.5.25",
   "after_dependencies": [
     "ffmpeg",
     "frontend"

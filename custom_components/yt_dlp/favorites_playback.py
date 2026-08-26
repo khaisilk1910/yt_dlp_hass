@@ -125,7 +125,6 @@ class FavoritesPlaybackController:
         self._generation = 0
         self._unsub_state: CALLBACK_TYPE | None = None
         self._unsub_service: CALLBACK_TYPE | None = None
-        self._restore_task: asyncio.Task[None] | None = None
         self._advance_task: asyncio.Task[None] | None = None
         self._detach_task: asyncio.Task[None] | None = None
 
@@ -153,13 +152,18 @@ class FavoritesPlaybackController:
                 EVENT_CALL_SERVICE, self._handle_call_service_event
             )
         await self._async_ensure_loaded()
-        self._publish_state()
-        if self._active and self._queue and self._players and not self._stopping:
-            self._restore_task = self.entry.async_create_background_task(
-                self.hass,
-                self._async_restore_active_session(),
-                "yt_dlp_favorites_restore",
-            )
+
+        # Playback sessions are process-local state, not boot-persistent commands.
+        # A Home Assistant restart must never replay a previously active item.
+        # Preserve only the user's Favorites selections/repeat preference and
+        # discard the stale queue/target/current-media snapshot from storage.
+        if self._active:
+            async with self._lock:
+                self._generation += 1
+                self._clear_active_locked()
+                await self._async_save_locked()
+        else:
+            self._publish_state()
 
     async def async_stop(self) -> None:
         """Stop background tasks/listeners without changing persisted user state."""
@@ -170,10 +174,9 @@ class FavoritesPlaybackController:
         if self._unsub_service is not None:
             self._unsub_service()
             self._unsub_service = None
-        for task in (self._restore_task, self._advance_task, self._detach_task):
+        for task in (self._advance_task, self._detach_task):
             if task is not None and not task.done():
                 task.cancel()
-        self._restore_task = None
         self._advance_task = None
         self._detach_task = None
         self.hass.states.async_remove(STATE_FAVORITES_PLAYBACK)
@@ -399,6 +402,7 @@ class FavoritesPlaybackController:
         self._active_repeat_mode = "off"
         self._selection_bound = False
         self._current = None
+        self._started_at = 0.0
 
     async def async_stop_playback(self, *, clear_selection: bool = True) -> dict[str, Any]:
         """Stop Favorites playback; the card's Stop button clears selections."""
@@ -770,28 +774,3 @@ class FavoritesPlaybackController:
         finally:
             self._advance_task = None
 
-    async def _async_restore_active_session(self) -> None:
-        generation = -1
-        try:
-            await asyncio.sleep(_RESTORE_DELAY_SECONDS)
-            if self._stopping:
-                return
-            await self._async_ensure_loaded()
-            if not self._active or not self._queue or not self._players:
-                return
-            primary = self.hass.states.get(self._players[0])
-            if primary is not None and primary.state in {"playing", "paused", "buffering"}:
-                return
-            async with self._lock:
-                generation = self._generation
-            await self._async_play_current()
-        except asyncio.CancelledError:
-            return
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Unable to restore persisted Favorites playback: %s", err)
-            # Do not leave an unrecoverable stale session shown as active. Keep
-            # the user's checked songs/repeat preference intact for the next play.
-            async with self._lock:
-                if self._generation == generation:
-                    self._clear_active_locked()
-                    await self._async_save_locked()
