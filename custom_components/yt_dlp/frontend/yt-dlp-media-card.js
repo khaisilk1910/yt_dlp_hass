@@ -16,6 +16,12 @@ class YtDlpMediaCard extends HTMLElement {
     this._view = "player";
     this._favoritesTab = "online";
     this._youtubeUrl = "";
+    this._musicSearchQuery = "";
+    this._musicSearchResults = [];
+    this._musicSearchLoading = false;
+    this._musicSearchPerformed = false;
+    this._musicSearchResultQuery = "";
+    this._musicSearchError = "";
     this._favoriteUrl = "";
     this._favorites = [];
     this._favoritesLoaded = false;
@@ -622,6 +628,58 @@ class YtDlpMediaCard extends HTMLElement {
     })[mime] || (mime.includes("/") ? mime.split("/").pop().toUpperCase() : "AUDIO");
   }
 
+  _searchArtist(item) {
+    return item?.artist || item?.channel || item?.uploader || "Không rõ ca sĩ";
+  }
+
+  _searchFormatLabel(item) {
+    const direct = String(item?.file_format || "").trim().replace(/^\./, "");
+    const mime = String(item?.mime_type || "").trim();
+    if (direct || mime) return this._formatMediaType(item);
+    // Flat YouTube search intentionally avoids resolving all 20 streams.
+    // The exact container is selected lazily only when the item is played or
+    // added to Favorites; playback currently prefers M4A/AAC when available.
+    return "AUTO";
+  }
+
+  _renderMusicSearchResults() {
+    if (this._musicSearchLoading) {
+      return `<div class="music-search-state loading">${this._icon("loading")} <span>Đang tìm tối đa 20 bài nhạc...</span></div>`;
+    }
+    if (this._musicSearchError) {
+      return `<div class="music-search-state error">${this._icon("alert-circle-outline")} <span>${this._escape(this._musicSearchError)}</span></div>`;
+    }
+    if (!this._musicSearchPerformed) return "";
+    if (!this._musicSearchResults.length) {
+      return `<div class="music-search-state">${this._icon("music-off")} <span>Không tìm thấy bài phù hợp.</span></div>`;
+    }
+
+    return `
+      <div class="music-search-meta">
+        <span>Kết quả cho “${this._escape(this._musicSearchResultQuery)}”</span>
+        <b>${this._musicSearchResults.length} bài</b>
+      </div>
+      <div class="music-search-list">
+        ${this._musicSearchResults.map((item, index) => {
+          const favorited = this._favorites.some((favorite) => favorite.url === item.url);
+          return `
+            <div class="music-search-row">
+              <button class="favorite-main search-main" data-search-play="${index}" title="Phát ${this._escape(item.title || "bài nhạc")}" ${this._busy ? "disabled" : ""}>
+                <span class="favorite-thumb ${item.thumbnail ? "has-art" : ""}" style="${item.thumbnail ? `background-image:url('${this._escape(item.thumbnail)}')` : ""}">${item.thumbnail ? "" : this._icon("youtube")}</span>
+                <span class="favorite-copy">
+                  <strong>${this._escape(item.title || "YouTube audio")}</strong>
+                  <small>${this._escape(this._searchArtist(item))} · ${this._durationLabel(item.duration)} · ${this._escape(this._searchFormatLabel(item))}</small>
+                </span>
+                <span class="row-play">${this._icon("play")}</span>
+              </button>
+              <button class="search-favorite-btn ${favorited ? "saved" : ""}" data-search-favorite="${index}" title="${favorited ? "Đã có trong Yêu thích" : "Thêm vào Yêu thích"}" ${this._favoritesLoading ? "disabled" : ""}>
+                ${this._icon(favorited ? "heart" : "heart-plus-outline")}
+              </button>
+            </div>`;
+        }).join("")}
+      </div>`;
+  }
+
   _renderSpeakerPicker(players) {
     return `
       <div class="speaker-row">
@@ -1158,6 +1216,12 @@ class YtDlpMediaCard extends HTMLElement {
           <button id="saveCurrentFavorite" class="soft-btn heart-btn" ${!this._youtubeUrl.trim() || this._favoritesLoading ? "disabled" : ""} title="Thêm link này vào Yêu thích">${this._icon("heart-plus-outline")}</button>
           <button id="playUrl" class="accent-btn" ${!this._selectedPlayer || this._busy ? "disabled" : ""}>${this._icon("play")} Phát</button>
         </div>
+        <div class="music-search-box">
+          ${this._icon("magnify")}
+          <input id="musicSearchQuery" type="search" value="${this._escape(this._musicSearchQuery)}" placeholder="Nhập tên bài hát hoặc ca sĩ..." autocomplete="off">
+          <button id="searchMusic" class="accent-btn ${this._musicSearchLoading ? "busy" : ""}" ${this._musicSearchLoading || !this._musicSearchQuery.trim() ? "disabled" : ""}>${this._icon(this._musicSearchLoading ? "loading" : "magnify")} Tìm kiếm</button>
+        </div>
+        <div class="music-search-results">${this._renderMusicSearchResults()}</div>
       </section>` : "";
 
     const favoritesView = this._view === "favorites" ? this._renderFavoritesView(players, isPlaying) : "";
@@ -1322,6 +1386,24 @@ class YtDlpMediaCard extends HTMLElement {
     $("youtubeUrl")?.addEventListener("keydown", (event) => {
       if (event.key === "Enter") this._playUrl();
     });
+    $("musicSearchQuery")?.addEventListener("input", (event) => {
+      this._musicSearchQuery = event.target.value;
+      const button = this.shadowRoot.getElementById("searchMusic");
+      if (button && !this._musicSearchLoading) button.disabled = !this._musicSearchQuery.trim();
+    });
+    $("musicSearchQuery")?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this._searchMusic();
+      }
+    });
+    $("searchMusic")?.addEventListener("click", () => this._searchMusic());
+    this.shadowRoot.querySelectorAll("[data-search-play]").forEach((button) => {
+      button.addEventListener("click", () => this._playSearchResult(Number(button.dataset.searchPlay)));
+    });
+    this.shadowRoot.querySelectorAll("[data-search-favorite]").forEach((button) => {
+      button.addEventListener("click", () => this._addSearchResultFavorite(Number(button.dataset.searchFavorite)));
+    });
     $("playPause")?.addEventListener("click", () => this._playPause());
     $("stop")?.addEventListener("click", () => this._stopPlayback());
     $("previous")?.addEventListener("click", () => this._previous());
@@ -1485,6 +1567,61 @@ class YtDlpMediaCard extends HTMLElement {
     });
   }
 
+  async _searchMusic() {
+    const query = this._musicSearchQuery.trim();
+    if (!query) return this._notify("Hãy nhập tên bài hát hoặc ca sĩ cần tìm.");
+    if (!this._hass || this._musicSearchLoading) return;
+
+    this._musicSearchLoading = true;
+    this._musicSearchPerformed = true;
+    this._musicSearchError = "";
+    this._render();
+    try {
+      const response = await this._callServiceResponse("yt_dlp", "search", { query, limit: 20 });
+      const results = Array.isArray(response?.results) ? response.results : [];
+      this._musicSearchResults = results
+        .filter((item) => item && typeof item.url === "string" && item.url.startsWith("http"))
+        .slice(0, 20)
+        .map((item) => ({
+          ...item,
+          artist: item.artist || item.channel || item.uploader || null,
+        }));
+      this._musicSearchResultQuery = query;
+    } catch (error) {
+      this._musicSearchResults = [];
+      this._musicSearchResultQuery = query;
+      this._musicSearchError = `Không thể tìm kiếm: ${error?.message || error}`;
+    } finally {
+      this._musicSearchLoading = false;
+      this._render();
+    }
+  }
+
+  async _playSearchResult(index) {
+    const item = this._musicSearchResults[index];
+    if (!item?.url || this._busy) return;
+    if (!this._selectedPlayer) return this._notify("Hãy chọn thiết bị phát trước khi phát.");
+    this._youtubeUrl = item.url;
+    const resolved = await this._playUrl();
+    if (resolved && this._musicSearchResults[index]?.url === item.url) {
+      this._musicSearchResults[index] = { ...item, ...resolved };
+      this._render();
+    }
+  }
+
+  async _addSearchResultFavorite(index) {
+    const item = this._musicSearchResults[index];
+    if (!item?.url) return;
+    if (this._favorites.some((favorite) => favorite.url === item.url)) {
+      return this._notify(`Đã có trong Yêu thích: ${item.title || "YouTube audio"}`);
+    }
+    const saved = await this._addFavorite(item.url);
+    if (saved && this._musicSearchResults[index]?.url === item.url) {
+      this._musicSearchResults[index] = { ...item, ...saved };
+      this._render();
+    }
+  }
+
   async _playUrl() {
     const url = this._youtubeUrl.trim();
     if (!url) return this._notify("Hãy nhập link YouTube.");
@@ -1502,6 +1639,7 @@ class YtDlpMediaCard extends HTMLElement {
       this._currentFavoriteIndex = -1;
       const targetText = selectedPlayers.length > 1 ? ` trên ${selectedPlayers.length} thiết bị` : "";
       this._notify(`Đang phát${targetText}: ${response?.title || "YouTube"}`);
+      return response;
     } catch (error) {
       this._notify(`Không thể phát: ${error?.message || error}`);
     } finally {
@@ -1702,6 +1840,7 @@ class YtDlpMediaCard extends HTMLElement {
       this._favoritesPage = 1;
       if (this._favoriteUrl.trim() === url) this._favoriteUrl = "";
       this._notify(`Đã thêm Yêu thích: ${item.title || "YouTube audio"}`);
+      return item;
     } catch (error) {
       this._notify(`Không thể thêm Yêu thích: ${error?.message || error}`);
     } finally {
@@ -2337,6 +2476,7 @@ class YtDlpMediaCard extends HTMLElement {
       .library-list{overflow:auto;margin:0 -4px;padding:2px 4px 4px;scrollbar-width:thin}.library-list.scroll-five{max-height:260px}
       .library-tools{gap:8px}.search-box{flex:1;height:42px;gap:8px;padding:0 12px;border-radius:13px;background:var(--surface-soft);border:1px solid var(--border)}.soft-btn{width:42px;height:42px;border-radius:13px;background:var(--surface)}.library-meta{justify-content:space-between;gap:8px;padding:9px 2px 7px;color:var(--muted);font-size:9px}.library-meta span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.track-row{width:100%;min-height:52px;gap:10px;text-align:left;border:0;border-radius:13px;padding:9px 10px;background:transparent;cursor:pointer}.track-row:hover,.track-row.selected{background:var(--surface)}.track-icon{width:34px;height:34px;flex:0 0 34px;border-radius:10px;display:grid;place-items:center;background:var(--surface);color:var(--muted)}.track-row.selected .track-icon{background:color-mix(in srgb,var(--accent) 18%,var(--card-bg));color:color-mix(in srgb,var(--accent) 80%,var(--text))}.track-icon ha-icon{--mdc-icon-size:18px}.track-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}.track-text strong,.track-text small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.track-text strong{font-size:12px;font-weight:750}.track-text small{font-size:9px;color:var(--muted)}.track-size{font-size:9px;color:var(--muted);white-space:nowrap}.row-play{opacity:.65;color:var(--text);transition:opacity .15s}.track-row:hover .row-play,.track-row.selected .row-play{opacity:1}.row-play ha-icon{--mdc-icon-size:18px}.empty{height:120px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--muted);font-size:12px}.empty.compact{height:86px}.empty ha-icon{--mdc-icon-size:20px}
       .player-url-panel{margin-top:12px}.heart-btn{width:38px;height:38px;flex:0 0 38px;border-radius:11px;color:color-mix(in srgb,var(--accent) 78%,var(--text))}.heart-btn:disabled{opacity:.4;cursor:default}
+      .music-search-box{display:flex;align-items:center;gap:9px;margin-top:9px;padding:8px 8px 8px 13px;border-radius:16px;background:var(--surface-soft);border:1px solid var(--border)}.music-search-box>ha-icon{color:var(--muted);--mdc-icon-size:20px}.music-search-box input{min-width:0;flex:1;border:0;outline:0;color:var(--text);background:transparent}.music-search-box input::placeholder{color:color-mix(in srgb,var(--muted) 75%,transparent)}.music-search-box .accent-btn.busy ha-icon,.music-search-state.loading ha-icon{animation:spin 1s linear infinite}.music-search-results{margin-top:7px}.music-search-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 3px;color:var(--muted);font-size:9px}.music-search-meta span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.music-search-meta b{white-space:nowrap}.music-search-list{max-height:520px;overflow:auto;overscroll-behavior:contain;padding-right:2px}.music-search-row{display:grid;grid-template-columns:minmax(0,1fr) 36px;align-items:center;gap:5px;min-height:64px;padding:5px;border-radius:14px}.music-search-row:hover{background:var(--surface-soft)}.search-main:disabled{opacity:.55;cursor:default}.search-favorite-btn{width:34px;height:34px;border:0;border-radius:10px;display:grid;place-items:center;background:transparent;color:var(--muted);cursor:pointer}.search-favorite-btn:hover{background:var(--surface);color:color-mix(in srgb,var(--accent) 80%,var(--text))}.search-favorite-btn.saved{color:color-mix(in srgb,var(--accent) 84%,var(--text))}.search-favorite-btn:disabled{opacity:.4;cursor:default}.search-favorite-btn ha-icon{--mdc-icon-size:18px}.music-search-state{min-height:78px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--muted);font-size:10px;text-align:center}.music-search-state.error{color:#d63e50}.music-search-state.error ha-icon{animation:none}
       .favorites-player{margin-top:12px;padding:14px;border:1px solid var(--border);border-radius:18px;background:var(--surface-soft);box-shadow:0 8px 24px rgba(0,0,0,.06)}.favorites-player-head{display:flex;align-items:center;gap:11px;min-width:0}.favorites-player-icon{width:42px;height:42px;flex:0 0 42px;border-radius:13px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 13%,var(--card-bg));color:color-mix(in srgb,var(--accent) 82%,var(--text))}.favorites-player-icon ha-icon{--mdc-icon-size:22px}.favorites-player-copy{min-width:0;display:flex;flex:1;flex-direction:column;gap:2px}.favorites-player-copy small{font-size:8px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:color-mix(in srgb,var(--accent) 75%,var(--muted))}.favorites-player-copy strong,.favorites-player-copy span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorites-player-copy strong{font-size:12px}.favorites-player-copy span{font-size:9px;color:var(--muted)}.favorites-transport{padding-top:13px}.favorites-transport .controls{margin:15px 0 13px}.favorite-tabs{margin-top:14px}.favorite-add{display:flex;align-items:center;gap:9px;padding:8px 8px 8px 13px;margin-bottom:9px;border-radius:16px;background:var(--surface-soft);border:1px solid var(--border)}.favorite-add>ha-icon{color:var(--muted);--mdc-icon-size:20px}.favorite-add input{min-width:0;flex:1;border:0;outline:0;color:var(--text);background:transparent}.favorite-add input::placeholder{color:color-mix(in srgb,var(--muted) 75%,transparent)}.favorite-tools{margin-bottom:8px}.selection-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}.selection-left,.selection-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.selection-left>span{font-size:9px;color:var(--muted);white-space:nowrap}.soft-btn.small{width:auto;height:32px;padding:0 9px;border-radius:10px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:9px;font-weight:750}.soft-btn.small:disabled{opacity:.4;cursor:default;transform:none}.soft-btn.small ha-icon{--mdc-icon-size:15px}.soft-btn.danger{color:#d63e50}.repeat-one,.repeat-all{color:color-mix(in srgb,var(--accent) 82%,var(--text));background:color-mix(in srgb,var(--accent) 11%,var(--card-bg))}.accent-btn.compact{height:32px;padding:0 10px;border-radius:10px;font-size:9px}.favorite-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 2px 7px;color:var(--muted);font-size:9px}.favorite-meta span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.favorite-list{max-height:520px;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;padding-right:2px}.favorite-row{display:grid;grid-template-columns:32px minmax(0,1fr) 34px;align-items:center;gap:5px;min-height:64px;padding:5px;border-radius:14px}.favorite-row:hover,.favorite-row.selected{background:var(--surface-soft)}.check-btn,.delete-btn{width:32px;height:32px;border:0;border-radius:9px;display:grid;place-items:center;background:transparent;color:var(--muted);cursor:pointer}.check-btn:hover,.delete-btn:hover{background:var(--surface)}.check-btn.checked{color:color-mix(in srgb,var(--accent) 80%,var(--text))}.delete-btn:hover{color:#d63e50}.check-btn ha-icon,.delete-btn ha-icon{--mdc-icon-size:18px}.favorite-main{min-width:0;width:100%;border:0;background:transparent;display:flex;align-items:center;gap:10px;text-align:left;cursor:pointer;padding:3px}.favorite-thumb{width:52px;height:52px;flex:0 0 52px;border-radius:11px;display:grid;place-items:center;background:var(--surface);background-size:cover;background-position:center;color:var(--muted);overflow:hidden}.favorite-thumb.has-art{box-shadow:inset 0 0 0 1px var(--border-soft)}.favorite-thumb.local{background:color-mix(in srgb,var(--accent) 9%,var(--card-bg));color:color-mix(in srgb,var(--accent) 75%,var(--text))}.favorite-thumb ha-icon{--mdc-icon-size:23px}.favorite-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:5px}.favorite-copy strong,.favorite-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favorite-copy strong{font-size:12px;font-weight:780}.favorite-copy small{font-size:9px;color:var(--muted)}.favorite-main .row-play{flex:0 0 auto;padding:0 3px}.favorite-row.selected .row-play{color:color-mix(in srgb,var(--accent) 80%,var(--text));opacity:1}
       .pagination{justify-content:center;gap:5px;margin-top:8px;min-height:30px}.pagination button{min-width:29px;height:29px;padding:0 8px;border:1px solid var(--border-soft);border-radius:9px;background:var(--surface-soft);color:var(--muted);cursor:pointer;font-size:10px;font-weight:750}.pagination button:hover{color:var(--text);background:var(--surface)}.pagination button.active{border-color:color-mix(in srgb,var(--accent) 42%,transparent);background:color-mix(in srgb,var(--accent) 14%,var(--card-bg));color:color-mix(in srgb,var(--accent) 76%,var(--text))}.page-gap{color:var(--muted);font-size:10px}
       .download-hero{gap:11px;margin-bottom:12px;padding:12px 13px;border-radius:16px;background:color-mix(in srgb,var(--accent) 8%,var(--card-bg));border:1px solid color-mix(in srgb,var(--accent) 18%,var(--border))}.download-hero-icon{width:39px;height:39px;display:grid;place-items:center;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}.download-hero-icon ha-icon{--mdc-icon-size:22px}.download-hero>div:last-child{display:flex;flex-direction:column;gap:3px}.download-hero strong{font-size:13px}.download-hero span{font-size:9px;color:var(--muted)}
@@ -2346,7 +2486,7 @@ class YtDlpMediaCard extends HTMLElement {
       .download-btn{width:100%;height:45px;margin-top:11px;border:0;border-radius:14px;display:flex;align-items:center;justify-content:center;gap:8px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 72%,var(--accent)));color:#fff;font-size:12px;font-weight:850;cursor:pointer;box-shadow:0 9px 24px color-mix(in srgb,var(--accent) 22%,transparent);transition:transform .18s ease,opacity .18s ease}.download-btn:hover:not(:disabled){transform:translateY(-1px)}.download-btn:disabled{opacity:.45;cursor:default;box-shadow:none}.download-btn ha-icon{--mdc-icon-size:19px}
       @keyframes spin{to{transform:rotate(360deg)}}@keyframes ring{0%{opacity:.7;transform:scale(.97)}100%{opacity:0;transform:scale(1.1)}}@keyframes floatbg{from{transform:scale(1.1) translate3d(-1%,0,0)}to{transform:scale(1.18) translate3d(1%,1%,0)}}@keyframes noticeIn{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}@keyframes pulseDot{50%{opacity:.35;transform:scale(.75)}}@keyframes downloadFloat{50%{transform:translateY(2px)}}
       @container (max-width:520px){.surface{padding:16px}.selection-toolbar{align-items:stretch}.selection-left,.selection-actions{width:100%}.selection-actions{justify-content:flex-end}.favorite-list{max-height:430px}.primary-tabs button{height:45px;font-size:11px;gap:7px}.primary-tabs ha-icon{--mdc-icon-size:20px}.now-playing{gap:15px;padding-top:20px}.art-wrap{width:94px;height:94px;flex-basis:94px;border-radius:23px}.art{border-radius:19px}.track-title{font-size:clamp(17px,6cqi,20px)}.controls{gap:9px}.icon-btn{width:40px;height:40px}.play-btn{width:58px;height:58px}.library-list.scroll-five{max-height:250px}.track-size{display:none}.tabs button{font-size:11px;gap:5px}.tabs button span{max-width:62px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.option-grid{grid-template-columns:1fr}.download-hero span{display:none}.speaker-menu-head{align-items:flex-start;flex-wrap:wrap}.speaker-menu-head>div{width:100%;justify-content:flex-end;flex-wrap:wrap}}
-      @container (max-width:380px){.favorite-row{grid-template-columns:28px minmax(0,1fr) 30px;padding:4px}.favorite-thumb{width:44px;height:44px;flex-basis:44px}.favorite-copy strong{font-size:11px}.selection-left>span{width:100%}.selection-actions .soft-btn.small{flex:1}.selection-actions .accent-btn.compact{flex:1;justify-content:center}.favorite-add{flex-wrap:wrap}.favorite-add>ha-icon{display:none}.favorite-add input{flex-basis:100%;height:30px}.favorite-add .accent-btn{width:100%;justify-content:center}.brand-icon{width:38px;height:38px;flex-basis:38px;border-radius:12px}.brand-icon ha-icon{--mdc-icon-size:23px}.activity-badge{height:26px;padding:0 7px;gap:4px;font-size:9px}.activity-badge ha-icon{--mdc-icon-size:13px}.primary-tabs button span{font-size:10px}.primary-tabs{padding:5px;gap:6px;margin-top:14px}.speaker-row{margin-top:14px}.speaker-menu{padding:8px}.speaker-menu-head>div{justify-content:flex-start}.speaker-menu-head button{flex:1;padding:0 5px}.speaker-menu-head .speaker-close span{display:none}.now-playing{gap:12px}.art-wrap{width:78px;height:78px;flex-basis:78px;border-radius:20px}.art{border-radius:16px}.art>ha-icon{--mdc-icon-size:38px}.track-title{font-size:17px}.track-subtitle{font-size:11px;margin-top:5px}.controls{gap:6px;margin:15px 0 14px}.icon-btn{width:36px;height:36px}.play-btn{width:52px;height:52px}.play-btn ha-icon{--mdc-icon-size:28px}.tabs b{display:none}.tabs button span{display:none}.tabs button{height:40px}.tabs ha-icon{--mdc-icon-size:20px}.url-box{flex-wrap:wrap;padding:9px}.url-box>ha-icon{display:none}.url-box input{flex-basis:100%;height:32px}.url-box .accent-btn{width:100%;justify-content:center}.download-hero{padding:10px}.pagination{flex-wrap:wrap}}
+      @container (max-width:380px){.favorite-row{grid-template-columns:28px minmax(0,1fr) 30px;padding:4px}.favorite-thumb{width:44px;height:44px;flex-basis:44px}.favorite-copy strong{font-size:11px}.selection-left>span{width:100%}.selection-actions .soft-btn.small{flex:1}.selection-actions .accent-btn.compact{flex:1;justify-content:center}.favorite-add{flex-wrap:wrap}.favorite-add>ha-icon{display:none}.favorite-add input{flex-basis:100%;height:30px}.favorite-add .accent-btn{width:100%;justify-content:center}.brand-icon{width:38px;height:38px;flex-basis:38px;border-radius:12px}.brand-icon ha-icon{--mdc-icon-size:23px}.activity-badge{height:26px;padding:0 7px;gap:4px;font-size:9px}.activity-badge ha-icon{--mdc-icon-size:13px}.primary-tabs button span{font-size:10px}.primary-tabs{padding:5px;gap:6px;margin-top:14px}.speaker-row{margin-top:14px}.speaker-menu{padding:8px}.speaker-menu-head>div{justify-content:flex-start}.speaker-menu-head button{flex:1;padding:0 5px}.speaker-menu-head .speaker-close span{display:none}.now-playing{gap:12px}.art-wrap{width:78px;height:78px;flex-basis:78px;border-radius:20px}.art{border-radius:16px}.art>ha-icon{--mdc-icon-size:38px}.track-title{font-size:17px}.track-subtitle{font-size:11px;margin-top:5px}.controls{gap:6px;margin:15px 0 14px}.icon-btn{width:36px;height:36px}.play-btn{width:52px;height:52px}.play-btn ha-icon{--mdc-icon-size:28px}.tabs b{display:none}.tabs button span{display:none}.tabs button{height:40px}.tabs ha-icon{--mdc-icon-size:20px}.url-box{flex-wrap:wrap;padding:9px}.url-box>ha-icon{display:none}.url-box input{flex-basis:100%;height:32px}.url-box .accent-btn{width:100%;justify-content:center}.music-search-box{flex-wrap:wrap;padding:9px}.music-search-box>ha-icon{display:none}.music-search-box input{flex-basis:100%;height:32px}.music-search-box .accent-btn{width:100%;justify-content:center}.music-search-row{grid-template-columns:minmax(0,1fr) 32px;padding:4px}.search-favorite-btn{width:30px;height:30px}.download-hero{padding:10px}.pagination{flex-wrap:wrap}}
       @container (max-width:300px){.surface{padding:12px}.eyebrow{display:none}.brand{gap:9px}.primary-tabs button span{display:none}.primary-tabs button{height:42px}.field{padding:0 10px}.speaker-summary{font-size:11px}.speaker-menu-head strong{width:100%}.speaker-menu-head>div{display:grid;grid-template-columns:1fr 1fr;width:100%}.speaker-menu-head .speaker-close{grid-column:1/-1}.now-playing{align-items:flex-start}.art-wrap{width:68px;height:68px;flex-basis:68px}.controls{gap:4px}.icon-btn{width:34px;height:34px}.play-btn{width:48px;height:48px}.volume-row{gap:7px}.library-meta span:first-child{max-width:65%}}
       @media(max-width:520px){:host{max-width:100%}}
       @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

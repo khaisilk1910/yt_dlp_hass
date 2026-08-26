@@ -1046,6 +1046,11 @@ class YoutubeDlpManager:
                     "thumbnail": thumbnail,
                     "duration": duration,
                     "duration_string": duration_string,
+                    "artist": (
+                        entry.get("artist")
+                        or entry.get("channel")
+                        or entry.get("uploader")
+                    ),
                     "channel": entry.get("channel"),
                     "channel_id": entry.get("channel_id"),
                     "uploader": entry.get("uploader"),
