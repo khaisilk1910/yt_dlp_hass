@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .playback import PlaybackManager, StreamSession
 
 from .helpers import detect_javascript_runtime, youtube_dl_class
+from .js_runtime import async_ensure_javascript_runtime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -370,6 +371,10 @@ class DlnaPlaybackManager:
         await self.hass.async_add_executor_job(_safe_rmtree, staging_dir)
         await self.hass.async_add_executor_job(staging_dir.mkdir, 0o700, True, True)
         try:
+            # The direct relay normally reaches this fallback only after normal
+            # playback has already prepared the JS runtime. Ensure it here too
+            # so DLNA remains correct when invoked through a future/direct path.
+            await async_ensure_javascript_runtime(self.hass)
             yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
             youtube_dl_cls = youtube_dl_class(yt_dlp_module)
             source_path = await self.hass.async_add_executor_job(

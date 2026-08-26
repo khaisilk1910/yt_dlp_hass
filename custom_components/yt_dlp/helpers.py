@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import tempfile
 from types import ModuleType
 from typing import Any
@@ -45,13 +46,13 @@ def detect_javascript_runtime() -> tuple[str, str] | None:
     """Detect one external JavaScript runtime supported by yt-dlp.
 
     YouTube extraction in current yt-dlp requires an EJS-capable JavaScript
-    runtime. Home Assistant Core runs on Alpine/musl and does not guarantee a
-    suitable runtime in PATH, so this integration ships a Node.js musllinux
-    wheel and resolves its real binary directly. The import and file checks are
-    intentionally lazy: this helper is only called from yt-dlp worker threads,
-    never while Home Assistant is registering the integration.
+    runtime. Home Assistant does not guarantee a suitable runtime in PATH. The
+    integration resolves a compatible Node.js wheel when it is already present;
+    v0.5.24 installs that wheel lazily on the first user-triggered YouTube action
+    instead of making it a startup requirement. The import and file checks are
+    intentionally lazy and never run while Home Assistant registers the entry.
 
-    The bundled Node.js runtime is preferred over PATH entries so an older
+    The wheel-provided Node.js runtime is preferred over PATH entries so an older
     system Node (for example v20, no longer accepted by current yt-dlp EJS)
     cannot silently break both Play and Download.
     """
@@ -78,9 +79,38 @@ def detect_javascript_runtime() -> tuple[str, str] | None:
         ("quickjs", "qjs"),
         ("bun", "bun"),
     ):
-        if path := shutil.which(executable):
-            return runtime, path
+        path = shutil.which(executable)
+        if not path:
+            continue
+        # yt-dlp's current EJS support requires Node.js 22+. An older Node in
+        # Home Assistant's PATH must not prevent installation of the pinned
+        # compatible wheel, otherwise Play and Download can both fail later.
+        if runtime == "node" and not _node_version_is_supported(path):
+            continue
+        return runtime, path
     return None
+
+
+def _node_version_is_supported(path: str) -> bool:
+    """Return whether a PATH Node executable satisfies current yt-dlp EJS."""
+    try:
+        result = subprocess.run(
+            [path, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    value = result.stdout.strip().lstrip("vV")
+    try:
+        major = int(value.split(".", 1)[0])
+    except (TypeError, ValueError):
+        return False
+    return major >= 22
 
 
 def youtube_dl_class(module: ModuleType) -> type[Any]:

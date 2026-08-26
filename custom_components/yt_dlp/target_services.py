@@ -50,7 +50,6 @@ from .media_targets import configured_media_targets, platform_for_entity, target
 from .play_runtime import get_playback_manager
 from .playback import STREAM_MEDIA_SOURCE_PREFIX
 from .service_validation import http_url, media_player_entities
-from .tv_playback import get_tv_manager
 
 _LOGGER = logging.getLogger(__name__)
 _GET_SCHEMA = vol.Schema({})
@@ -575,6 +574,11 @@ def async_register_target_services(hass: HomeAssistant) -> None:
                 if tv_error is not None:
                     raise tv_error
                 if tv_payload is None:
+                    # TV is optional and must never be an import-time dependency of
+                    # managed speaker/DLNA playback. Import only when a TV is
+                    # actually selected.
+                    from .tv_playback import get_tv_manager
+
                     tv_payload = await get_tv_manager(hass).async_create_stream(url)
                 info, relay_path = tv_payload
                 relay_url = async_process_play_media_url(hass, relay_path)

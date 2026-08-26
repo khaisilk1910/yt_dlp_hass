@@ -15,14 +15,24 @@ if TYPE_CHECKING:
 
 
 def get_dlna_manager(hass: HomeAssistant) -> DlnaPlaybackManager:
-    """Return the loaded optional DLNA manager without touching core services."""
+    """Return or lazily create the optional DLNA manager.
+
+    The normal path initializes this after Home Assistant has fully started. The
+    lazy fallback makes service calls robust if an automation fires immediately
+    at startup or the post-start convenience task was unable to run.
+    """
     from .dlna import DlnaPlaybackManager
 
     for entry in hass.config_entries.async_entries(DOMAIN):
         if entry.state is not ConfigEntryState.LOADED:
             continue
-        manager = getattr(entry.runtime_data, "dlna_manager", None)
+        runtime = getattr(entry, "runtime_data", None)
+        manager = getattr(runtime, "dlna_manager", None)
         if isinstance(manager, DlnaPlaybackManager):
+            return manager
+        if runtime is not None:
+            manager = DlnaPlaybackManager(hass, None)
+            runtime.dlna_manager = manager
             return manager
     raise ServiceValidationError(
         translation_domain=DOMAIN,

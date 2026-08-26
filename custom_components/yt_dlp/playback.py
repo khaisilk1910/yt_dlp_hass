@@ -33,6 +33,7 @@ from .helpers import (
     normalize_download_directory,
     youtube_dl_class,
 )
+from .js_runtime import async_ensure_javascript_runtime
 
 _LOGGER = logging.getLogger(__name__)
 _JS_RUNTIME_UNSET = object()
@@ -610,6 +611,8 @@ class PlaybackManager:
         """Resolve one usable upstream route without downloading the media."""
         indexes = route_indexes or tuple(range(len(STREAM_FORMAT_SELECTORS)))
         async with self._stream_lock:
+            await async_ensure_javascript_runtime(self.hass)
+            self._javascript_runtime = _JS_RUNTIME_UNSET
             yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
             youtube_dl_cls = youtube_dl_class(yt_dlp_module)
             reload_attempt = 0

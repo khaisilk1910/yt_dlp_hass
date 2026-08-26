@@ -22,6 +22,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.importlib import async_import_module
 
 from .helpers import detect_javascript_runtime, youtube_dl_class
+from .js_runtime import async_ensure_javascript_runtime
 from .playback import YOUTUBE_CLIENT_FALLBACKS
 
 _LOGGER = logging.getLogger(__name__)
@@ -129,6 +130,8 @@ class TvPlaybackManager:
         last_error: Exception | None = None
         indexes = route_order or tuple(range(_TV_MAX_ROUTES))
         async with self._lock:
+            await async_ensure_javascript_runtime(self.hass)
+            self._javascript_runtime = _JS_RUNTIME_UNSET
             yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
             youtube_dl_cls = youtube_dl_class(yt_dlp_module)
             for clients in YOUTUBE_CLIENT_FALLBACKS:

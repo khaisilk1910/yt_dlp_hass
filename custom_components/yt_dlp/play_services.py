@@ -23,16 +23,10 @@ from .const import (
     ATTR_MEDIA_PLAYER,
     ATTR_MEDIA_PLAYERS,
     ATTR_URL,
-    CONF_MEDIA_TARGETS,
-    CONF_TARGET_ENTITY_ID,
-    CONF_TARGET_TYPE,
     DOMAIN,
     SERVICE_PLAY,
     SERVICE_PLAY_MULTI,
-    SERVICE_PLAY_TARGETS,
     SERVICE_SCAN_LIBRARY,
-    TARGET_TYPE_DLNA,
-    TARGET_TYPE_TV,
 )
 from .play_runtime import get_playback_manager
 from .service_validation import http_url, media_player_entities, media_player_entity
@@ -57,58 +51,9 @@ SCAN_LIBRARY_SCHEMA = vol.Schema({vol.Optional(ATTR_FORCE, default=False): cv.bo
 def async_register_play_services(hass: HomeAssistant) -> None:
     """Register protected direct speaker playback and library scan services."""
 
-    def _configured_target_type(entity_id: str) -> str | None:
-        # Zero-I/O lookup directly from this integration's config-entry options.
-        # Avoid importing optional target modules into the core speaker boundary.
-        for entry in hass.config_entries.async_entries(DOMAIN):
-            records = entry.options.get(CONF_MEDIA_TARGETS, [])
-            if not isinstance(records, list):
-                continue
-            for record in records:
-                if not isinstance(record, dict):
-                    continue
-                if str(record.get(CONF_TARGET_ENTITY_ID) or "") == entity_id:
-                    return str(record.get(CONF_TARGET_TYPE) or "")
-        return None
-
-    def _needs_managed_dispatch(entity_ids: list[str]) -> bool:
-        # Only configured DLNA/TV devices are diverted; ordinary speakers execute
-        # the original v0.5.16 code below unchanged.
-        return any(
-            _configured_target_type(entity_id) in {TARGET_TYPE_DLNA, TARGET_TYPE_TV}
-            for entity_id in entity_ids
-        )
-
-    async def _dispatch_managed(
-        call: ServiceCall, entity_ids: list[str]
-    ) -> ServiceResponse | None:
-        if not hass.services.has_service(DOMAIN, SERVICE_PLAY_TARGETS):
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="play_failed",
-                translation_placeholders={
-                    "error": "Managed DLNA/TV playback service is unavailable"
-                },
-            )
-        response = await hass.services.async_call(
-            DOMAIN,
-            SERVICE_PLAY_TARGETS,
-            service_data={
-                ATTR_URL: call.data[ATTR_URL],
-                ATTR_MEDIA_PLAYERS: entity_ids,
-            },
-            blocking=True,
-            context=call.context,
-            return_response=True,
-        )
-        return response if call.return_response else None
-
     async def async_play(call: ServiceCall) -> ServiceResponse | None:
-        entity_id = call.data[ATTR_MEDIA_PLAYER]
-        if _needs_managed_dispatch([entity_id]):
-            return await _dispatch_managed(call, [entity_id])
-
         playback = get_playback_manager(hass)
+        entity_id = call.data[ATTR_MEDIA_PLAYER]
         try:
             info, media_source_id = await playback.async_create_stream(call.data[ATTR_URL])
             metadata: dict[str, object] = {"title": info.title}
@@ -145,11 +90,8 @@ def async_register_play_services(hass: HomeAssistant) -> None:
         return response if call.return_response else None
 
     async def async_play_multi(call: ServiceCall) -> ServiceResponse | None:
-        entity_ids = list(call.data[ATTR_MEDIA_PLAYERS])
-        if _needs_managed_dispatch(entity_ids):
-            return await _dispatch_managed(call, entity_ids)
-
         playback = get_playback_manager(hass)
+        entity_ids = call.data[ATTR_MEDIA_PLAYERS]
         try:
             info, media_source_id = await playback.async_create_stream(call.data[ATTR_URL])
             metadata: dict[str, object] = {"title": info.title}

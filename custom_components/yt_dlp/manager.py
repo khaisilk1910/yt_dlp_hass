@@ -37,6 +37,7 @@ from .helpers import (
     ensure_writable_directory,
     youtube_dl_class,
 )
+from .js_runtime import async_ensure_javascript_runtime
 from .notifications import async_send_download_notifications
 
 _LOGGER = logging.getLogger(__name__)
@@ -240,6 +241,10 @@ class YoutubeDlpManager:
                 if job.cancel_event.is_set():
                     job.status = "cancelled"
                     return
+                # Ensure the large JS runtime only when a user actually starts a
+                # YouTube operation. It is deliberately not a startup requirement.
+                await async_ensure_javascript_runtime(self.hass)
+                self._javascript_runtime = _JS_RUNTIME_UNSET
                 # yt-dlp is intentionally imported lazily so Home Assistant startup
                 # does not pay its import cost. Use HA's import helper so the first
                 # concurrent search/download cannot race CPython's import machinery.
@@ -977,6 +982,8 @@ class YoutubeDlpManager:
         if self._stopping:
             raise RuntimeError("Integration is unloading")
         async with self._search_semaphore:
+            await async_ensure_javascript_runtime(self.hass)
+            self._javascript_runtime = _JS_RUNTIME_UNSET
             # Keep the heavy optional dependency out of startup while ensuring
             # thread-safe lazy importing on the first action call.
             yt_dlp_module = await async_import_module(self.hass, "yt_dlp")
