@@ -670,12 +670,25 @@ class YtDlpMediaCard extends HTMLElement {
     if (value === null || value === undefined || value === "") return "— views";
     const count = Number(value);
     if (!Number.isFinite(count) || count < 0) return "— views";
+
     const rounded = Math.round(count);
-    try {
-      return `${new Intl.NumberFormat("vi-VN").format(rounded)} views`;
-    } catch (_error) {
-      return `${rounded} views`;
+    const compactOneDecimal = (amount, suffix) => {
+      const tenths = Math.round(amount * 10);
+      const whole = Math.floor(tenths / 10);
+      const decimal = tenths % 10;
+      return `${whole}${suffix}${decimal ? decimal : ""} views`;
+    };
+
+    if (rounded >= 1_000_000_000) {
+      return compactOneDecimal(rounded / 1_000_000_000, "b");
     }
+    if (rounded >= 1_000_000) {
+      return compactOneDecimal(rounded / 1_000_000, "m");
+    }
+    if (rounded >= 1_000) {
+      return `${Math.round(rounded / 1_000)}k views`;
+    }
+    return `${rounded} views`;
   }
 
   _persistMusicSearch() {
