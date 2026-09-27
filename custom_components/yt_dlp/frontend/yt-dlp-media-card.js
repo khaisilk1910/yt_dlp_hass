@@ -72,6 +72,8 @@ class YtDlpMediaCard extends HTMLElement {
     this._speakerCloseTimer = null;
     this._favoritesViewportRestoreGeneration = 0;
     this._musicSearchViewportRestoreGeneration = 0;
+    this._favoritesFilterFrame = 0;
+    this._favoritesFilterKind = "online";
 
     this._downloadForm = {
       url: "",
@@ -266,10 +268,12 @@ class YtDlpMediaCard extends HTMLElement {
     if (this._speakerCloseTimer) window.clearTimeout(this._speakerCloseTimer);
     if (this._interruptionCandidateTimer) window.clearTimeout(this._interruptionCandidateTimer);
     if (this._favoriteSettingsTimer) window.clearTimeout(this._favoriteSettingsTimer);
+    if (this._favoritesFilterFrame) window.cancelAnimationFrame?.(this._favoritesFilterFrame);
     this._tickTimer = null;
     this._speakerCloseTimer = null;
     this._interruptionCandidateTimer = null;
     this._favoriteSettingsTimer = null;
+    this._favoritesFilterFrame = 0;
   }
 
   getCardSize() {
@@ -954,6 +958,139 @@ class YtDlpMediaCard extends HTMLElement {
       ${panel}`;
   }
 
+  _favoritesSearchFocused() {
+    if (this._view !== "favorites" || !this.shadowRoot) return false;
+    const active = this.shadowRoot.activeElement;
+    if (!active) return false;
+    return (this._favoritesTab === "online" && active.id === "onlineSearch")
+      || (this._favoritesTab === "offline" && active.id === "offlineSearch");
+  }
+
+  _scheduleFavoritesFilterUpdate(kind) {
+    this._favoritesFilterKind = kind;
+    if (this._favoritesFilterFrame) return;
+    this._favoritesFilterFrame = window.requestAnimationFrame(() => {
+      this._favoritesFilterFrame = 0;
+      const pendingKind = this._favoritesFilterKind;
+      if (this._view === "favorites" && this._favoritesTab === pendingKind) {
+        this._updateFavoritesFilterUI(pendingKind);
+      }
+    });
+  }
+
+  _bindFilteredFavoriteRows(panel, kind) {
+    if (!panel) return;
+    if (kind === "online") {
+      panel.querySelectorAll("[data-online-index]").forEach((button) => {
+        button.addEventListener("click", () => this._playFavorite(Number(button.dataset.onlineIndex), false));
+      });
+      panel.querySelectorAll("[data-online-select]").forEach((button) => {
+        button.addEventListener("click", () => this._toggleSelection(this._onlineSelected, button.dataset.onlineSelect, "online"));
+      });
+      panel.querySelectorAll("[data-remove-favorite]").forEach((button) => {
+        button.addEventListener("click", () => this._removeFavorite(button.dataset.removeFavorite));
+      });
+    } else {
+      panel.querySelectorAll("[data-offline-index]").forEach((button) => {
+        button.addEventListener("click", () => this._playLibrary(Number(button.dataset.offlineIndex), false));
+      });
+      panel.querySelectorAll("[data-offline-select]").forEach((button) => {
+        button.addEventListener("click", () => this._toggleSelection(this._offlineSelected, button.dataset.offlineSelect, "offline"));
+      });
+    }
+
+    panel.querySelectorAll("[data-page-kind]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const page = Number(button.dataset.page) || 1;
+        if (kind === "online") this._favoritesPage = page;
+        else this._libraryPage = page;
+        this._updateFavoritesFilterUI(kind);
+      });
+    });
+  }
+
+  _updateFavoritesFilterUI(kind) {
+    if (!this.shadowRoot || this._view !== "favorites" || this._favoritesTab !== kind) return;
+    const isPlaying = this._state()?.state === "playing";
+    const online = kind === "online";
+    const source = online ? this._favorites : this._library;
+    const query = (online ? this._onlineQuery : this._offlineQuery).trim().toLowerCase();
+    const filtered = source
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => {
+        const haystack = online
+          ? `${item.title || ""} ${item.artist || ""} ${item.url || ""}`
+          : `${item.title || ""} ${item.artist || ""} ${item.filename || ""}`;
+        return !query || haystack.toLowerCase().includes(query);
+      });
+    const page = this._pageData(filtered, online ? this._favoritesPage : this._libraryPage);
+    if (online) this._favoritesPage = page.page;
+    else this._libraryPage = page.page;
+
+    const panel = this.shadowRoot.getElementById(online ? "favoriteOnlinePanel" : "favoriteOfflinePanel");
+    const list = panel?.querySelector(".favorite-list");
+    if (!panel || !list) return;
+
+    const metaCount = panel.querySelector(".favorite-meta span:last-child");
+    if (metaCount) metaCount.textContent = `${filtered.length} / ${source.length} bài`;
+
+    const loading = online
+      ? this._favoritesLoading && !this._favoritesLoaded
+      : this._libraryLoading && !this._libraryLoaded;
+    const loaded = online ? this._favoritesLoaded : this._libraryLoaded;
+    const emptyIcon = online ? "heart-outline" : "music-off";
+    const emptyText = online ? "Chưa có bài Online yêu thích." : "Không tìm thấy file nhạc.";
+
+    const rows = page.items.map(({ item, index }) => {
+      if (online) {
+        const selected = this._onlineSelected.has(item.url);
+        const current = index === this._currentFavoriteIndex;
+        return `
+          <div class="favorite-row ${current ? "selected" : ""}">
+            <button class="check-btn ${selected ? "checked" : ""}" data-online-select="${this._escape(item.url)}" title="Chọn bài">${this._icon(selected ? "checkbox-marked" : "checkbox-blank-outline")}</button>
+            <button class="favorite-main" data-online-index="${index}" title="Phát ${this._escape(item.title || "bài nhạc")}">
+              <span class="favorite-thumb ${item.thumbnail ? "has-art" : ""}" style="${item.thumbnail ? `background-image:url('${this._escape(item.thumbnail)}')` : ""}">${item.thumbnail ? "" : this._icon("youtube")}</span>
+              <span class="favorite-copy">
+                <strong>${this._escape(item.title || "YouTube audio")}</strong>
+                <small>${this._escape(item.artist || "Không rõ ca sĩ")} · ${this._durationLabel(item.duration)} · ${this._escape(this._formatMediaType(item))}</small>
+              </span>
+              <span class="row-play">${this._icon(current && isPlaying ? "equalizer" : "play")}</span>
+            </button>
+            <button class="delete-btn" data-remove-favorite="${this._escape(item.url)}" title="Xóa khỏi Yêu thích">${this._icon("delete-outline")}</button>
+          </div>`;
+      }
+
+      const selected = this._offlineSelected.has(item.id);
+      const current = index === this._currentLibraryIndex;
+      return `
+        <div class="favorite-row ${current ? "selected" : ""}">
+          <button class="check-btn ${selected ? "checked" : ""}" data-offline-select="${this._escape(item.id)}" title="Chọn bài">${this._icon(selected ? "checkbox-marked" : "checkbox-blank-outline")}</button>
+          <button class="favorite-main" data-offline-index="${index}" title="Phát ${this._escape(item.title || item.filename)}">
+            <span class="favorite-thumb local">${this._icon(current && isPlaying ? "equalizer" : "music-note")}</span>
+            <span class="favorite-copy">
+              <strong>${this._escape(item.title || item.filename)}</strong>
+              <small>${this._escape(item.artist || "Không rõ ca sĩ")} · ${this._durationLabel(item.duration)} · ${this._escape(this._formatMediaType(item))}</small>
+            </span>
+            <span class="row-play">${this._icon(current && isPlaying ? "equalizer" : "play")}</span>
+          </button>
+        </div>`;
+    }).join("");
+
+    list.innerHTML = `${loading ? `<div class="empty">${this._icon("loading")} ${online ? "Đang tải danh sách yêu thích..." : "Đang quét thư viện..."}</div>` : ""}${!loading && loaded && !filtered.length ? `<div class="empty">${this._icon(emptyIcon)} ${emptyText}</div>` : ""}${rows}`;
+    list.scrollTop = 0;
+
+    const paginationHtml = this._renderPagination(online ? "favorites-online" : "favorites-offline", page.page, page.totalPages);
+    const existingPagination = panel.querySelector(".pagination");
+    if (existingPagination) {
+      if (paginationHtml) existingPagination.outerHTML = paginationHtml;
+      else existingPagination.remove();
+    } else if (paginationHtml) {
+      list.insertAdjacentHTML("afterend", paginationHtml);
+    }
+
+    this._bindFilteredFavoriteRows(panel, kind);
+  }
+
   _backgroundOpacity() {
     const value = Number(this._config?.background_opacity);
     return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 100;
@@ -1351,6 +1488,11 @@ class YtDlpMediaCard extends HTMLElement {
 
   _render() {
     if (!this.shadowRoot) return;
+    if (this._favoritesSearchFocused()) {
+      this._scheduleFavoritesFilterUpdate(this._favoritesTab);
+      this._updateProgressOnly();
+      return;
+    }
     const favoritesViewport = this._captureFavoritesViewport();
     const musicSearchViewport = this._captureMusicSearchViewport();
     const state = this._state();
@@ -1601,21 +1743,15 @@ class YtDlpMediaCard extends HTMLElement {
     $("refreshFavorites")?.addEventListener("click", () => this._loadFavorites());
     $("refreshLibrary")?.addEventListener("click", () => this._loadLibrary(true));
 
-    const bindSearch = (id, field, pageField) => {
+    const bindSearch = (id, field, pageField, kind) => {
       $(id)?.addEventListener("input", (event) => {
         this[field] = event.target.value;
         this[pageField] = 1;
-        const value = event.target.value;
-        this._render();
-        const search = this.shadowRoot.getElementById(id);
-        if (search) {
-          search.focus();
-          search.setSelectionRange(value.length, value.length);
-        }
+        this._scheduleFavoritesFilterUpdate(kind);
       });
     };
-    bindSearch("onlineSearch", "_onlineQuery", "_favoritesPage");
-    bindSearch("offlineSearch", "_offlineQuery", "_libraryPage");
+    bindSearch("onlineSearch", "_onlineQuery", "_favoritesPage", "online");
+    bindSearch("offlineSearch", "_offlineQuery", "_libraryPage", "offline");
 
     this.shadowRoot.querySelectorAll("[data-online-index]").forEach((button) => {
       button.addEventListener("click", () => this._playFavorite(Number(button.dataset.onlineIndex), false));
