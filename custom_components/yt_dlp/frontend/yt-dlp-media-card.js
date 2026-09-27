@@ -124,7 +124,7 @@ class YtDlpMediaCard extends HTMLElement {
               .slice(0, 20)
           : [];
         const restoredQuery = String(storedSearch.query || "").trim();
-        this._musicSearchResults = restored;
+        this._musicSearchResults = this._sortMusicSearchResultsByViews(restored);
         this._musicSearchResultQuery = restoredQuery;
         this._musicSearchQuery = restoredQuery;
         this._musicSearchPerformed = Boolean(restoredQuery || restored.length);
@@ -664,6 +664,22 @@ class YtDlpMediaCard extends HTMLElement {
     // The exact container is selected lazily only when the item is played or
     // added to Favorites; playback currently prefers M4A/AAC when available.
     return "AUTO";
+  }
+
+  _searchViewCount(item) {
+    const value = item?.view_count;
+    if (value === null || value === undefined || value === "") return -1;
+    const count = Number(value);
+    return Number.isFinite(count) && count >= 0 ? count : -1;
+  }
+
+  _sortMusicSearchResultsByViews(items) {
+    // Sort exactly once when results arrive/restore, never during render. With
+    // at most 20 rows this is effectively free and keeps dashboard scrolling
+    // smooth. Unknown view counts stay at the bottom; equal counts preserve
+    // YouTube's original relevance order because modern JS sort is stable.
+    items.sort((a, b) => this._searchViewCount(b) - this._searchViewCount(a));
+    return items;
   }
 
   _formatViewCount(value) {
@@ -1744,13 +1760,15 @@ class YtDlpMediaCard extends HTMLElement {
     try {
       const response = await this._callServiceResponse("yt_dlp", "search", { query, limit: 20 });
       const results = Array.isArray(response?.results) ? response.results : [];
-      this._musicSearchResults = results
-        .filter((item) => item && typeof item.url === "string" && item.url.startsWith("http"))
-        .slice(0, 20)
-        .map((item) => ({
-          ...item,
-          artist: item.artist || item.channel || item.uploader || null,
-        }));
+      this._musicSearchResults = this._sortMusicSearchResultsByViews(
+        results
+          .filter((item) => item && typeof item.url === "string" && item.url.startsWith("http"))
+          .slice(0, 20)
+          .map((item) => ({
+            ...item,
+            artist: item.artist || item.channel || item.uploader || null,
+          }))
+      );
       this._musicSearchResultQuery = query;
       this._persistMusicSearch();
     } catch (error) {
