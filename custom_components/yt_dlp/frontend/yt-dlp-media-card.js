@@ -821,6 +821,7 @@ class YtDlpMediaCard extends HTMLElement {
         <div class="selection-actions">
           <button data-repeat-mode class="soft-btn small repeat-${this._repeatMode}" title="Đổi chế độ lặp">${this._icon(this._repeatIcon())} ${this._repeatLabel()}</button>
           <button data-stop-favorites class="soft-btn small danger" title="Dừng loa đã chọn">${this._icon("stop")} Dừng</button>
+          <button id="playRandom${suffix}" class="soft-btn small" title="Chọn ngẫu nhiên một bài trong toàn bộ Yêu thích ${suffix} mỗi lần nhấn" ${totalCount && this._selectedPlayer && !this._busy ? "" : "disabled"}>${this._icon("shuffle")} Ngẫu nhiên 1 bài</button>
           <button id="playSelected${suffix}" class="accent-btn compact" ${selectedCount && this._selectedPlayer && !this._busy ? "" : "disabled"}>${this._icon("playlist-play")} Phát đã chọn</button>
         </div>
       </div>`;
@@ -1780,9 +1781,11 @@ class YtDlpMediaCard extends HTMLElement {
     $("selectAllOnline")?.addEventListener("click", () => this._selectAllFavorites("online"));
     $("clearOnline")?.addEventListener("click", () => { this._onlineSelected.clear(); this._schedulePersistFavoriteSettings(); this._render(); });
     $("playSelectedOnline")?.addEventListener("click", () => this._startQueue("online"));
+    $("playRandomOnline")?.addEventListener("click", () => this._startRandomFavorite("online"));
     $("selectAllOffline")?.addEventListener("click", () => this._selectAllFavorites("offline"));
     $("clearOffline")?.addEventListener("click", () => { this._offlineSelected.clear(); this._schedulePersistFavoriteSettings(); this._render(); });
     $("playSelectedOffline")?.addEventListener("click", () => this._startQueue("offline"));
+    $("playRandomOffline")?.addEventListener("click", () => this._startRandomFavorite("offline"));
     this.shadowRoot.querySelectorAll("[data-repeat-mode]").forEach((button) => button.addEventListener("click", () => this._cycleRepeatMode()));
     this.shadowRoot.querySelectorAll("[data-stop-favorites]").forEach((button) => button.addEventListener("click", () => this._stopFavoritesPlayback()));
 
@@ -2266,6 +2269,34 @@ class YtDlpMediaCard extends HTMLElement {
       : this._library.filter((item) => this._offlineSelected.has(item.id)).map((item) => item.id);
     if (!queue.length) return this._notify("Hãy chọn ít nhất một bài để phát liên tiếp.");
     await this._startFavoriteBackend(kind, queue, true, this._repeatMode);
+  }
+
+  async _startRandomFavorite(kind) {
+    if (!this._selectedPlayer) return this._notify("Hãy chọn thiết bị phát trước khi phát.");
+    const selectedPlayers = this._targetPlayers();
+    if (!selectedPlayers.length || !this._hass || this._busy) return;
+    // Server resolves the latest catalog and draws a new item for every click.
+    // Existing checked selections and repeat preference remain unchanged.
+    this._queue = null;
+    this._queueStopRequested = false;
+    this._clearPlaybackInterruption();
+    this._activePlayback = null;
+    this._busy = true;
+    this._render();
+    try {
+      const response = await this._callServiceResponse("yt_dlp", "favorites_playback_play_random", {
+        kind,
+        media_players: selectedPlayers,
+        repeat_mode: "off",
+        replace_selection: false,
+      });
+      this._applyFavoritePlaybackState(response, false);
+    } catch (error) {
+      this._notify(`Không thể phát ngẫu nhiên: ${error?.message || error}`);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
   }
 
   async _startFavoriteBackend(kind, queue, replaceSelection, repeatMode) {
