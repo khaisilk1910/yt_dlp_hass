@@ -321,14 +321,17 @@ class FavoritesPlaybackController:
         media_players: list[str],
         repeat_mode: str,
         replace_selection: bool,
+        start_index: int = 0,
     ) -> dict[str, Any]:
-        """Start one Favorites queue and keep advancing it in Home Assistant."""
+        """Start a Favorites queue at a chosen zero-based cursor position."""
         await self._async_ensure_loaded()
         if kind not in _KINDS:
             raise ValueError("Unsupported Favorites playback kind")
         clean_queue = _unique_strings(queue)
         if not clean_queue:
             raise ValueError("Favorites queue is empty")
+        if not 0 <= start_index < len(clean_queue):
+            raise ValueError("Favorites start index is out of range")
         players = [
             entity_id
             for entity_id in _unique_strings(media_players, limit=32)
@@ -350,7 +353,7 @@ class FavoritesPlaybackController:
             self._active = True
             self._kind = kind
             self._queue = list(clean_queue)
-            self._cursor = 0
+            self._cursor = start_index
             self._players = players
             self._active_repeat_mode = repeat
             self._selection_bound = bool(replace_selection)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "yt_dlp"
-VERSION = "0.5.31"
+VERSION = "0.5.33"
 
 STATE_DOWNLOADER = f"{DOMAIN}.downloader"
 STATE_FAVORITES_PLAYBACK = f"{DOMAIN}.favorites_playback"
@@ -24,6 +24,8 @@ SERVICE_FAVORITES_REMOVE = "favorites_remove"
 SERVICE_FAVORITES_PLAYBACK_GET = "favorites_playback_get"
 SERVICE_FAVORITES_PLAYBACK_SET = "favorites_playback_set"
 SERVICE_FAVORITES_PLAYBACK_START = "favorites_playback_start"
+SERVICE_FAVORITES_PLAYBACK_PLAY_POSITION = "favorites_playback_play_position"
+SERVICE_FAVORITES_PLAYBACK_PLAY_RANDOM = "favorites_playback_play_random"
 SERVICE_FAVORITES_PLAYBACK_SKIP = "favorites_playback_skip"
 SERVICE_FAVORITES_PLAYBACK_STOP = "favorites_playback_stop"
 
@@ -46,6 +48,8 @@ ATTR_OFFLINE_SELECTED = "offline_selected"
 ATTR_REPEAT_MODE = "repeat_mode"
 ATTR_KIND = "kind"
 ATTR_QUEUE = "queue"
+ATTR_POSITION = "position"
+ATTR_PLAY_MODE = "play_mode"
 ATTR_REPLACE_SELECTION = "replace_selection"
 ATTR_DIRECTION = "direction"
 

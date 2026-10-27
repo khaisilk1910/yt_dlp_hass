@@ -271,6 +271,80 @@ favorites_playback_start:
       selector:
         boolean:
 
+favorites_playback_play_position:
+  fields:
+    kind:
+      required: true
+      selector:
+        select:
+          options:
+            - online
+            - offline
+    position:
+      required: true
+      example: 3
+      selector:
+        number:
+          min: 1
+          max: 1000
+          step: 1
+          mode: box
+    media_players:
+      required: true
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: media_player
+    play_mode:
+      default: single
+      selector:
+        select:
+          options:
+            - single
+            - continue
+    repeat_mode:
+      default: "off"
+      selector:
+        select:
+          options:
+            - "off"
+            - "one"
+            - "all"
+    replace_selection:
+      default: false
+      selector:
+        boolean:
+
+favorites_playback_play_random:
+  fields:
+    kind:
+      required: true
+      selector:
+        select:
+          options:
+            - online
+            - offline
+    media_players:
+      required: true
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: media_player
+    repeat_mode:
+      default: "off"
+      selector:
+        select:
+          options:
+            - "off"
+            - "one"
+            - "all"
+    replace_selection:
+      default: false
+      selector:
+        boolean:
+
 favorites_playback_skip:
   fields:
     direction:

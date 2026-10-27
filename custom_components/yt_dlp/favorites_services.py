@@ -7,6 +7,8 @@ wraps the protected direct play/download service handlers.
 
 from __future__ import annotations
 
+import random
+
 import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
@@ -18,6 +20,8 @@ from .const import (
     ATTR_KIND,
     ATTR_MEDIA_PLAYERS,
     ATTR_OFFLINE_SELECTED,
+    ATTR_PLAY_MODE,
+    ATTR_POSITION,
     ATTR_ONLINE_SELECTED,
     ATTR_QUEUE,
     ATTR_REPEAT_MODE,
@@ -27,6 +31,8 @@ from .const import (
     SERVICE_FAVORITES_ADD,
     SERVICE_FAVORITES_LIST,
     SERVICE_FAVORITES_PLAYBACK_GET,
+    SERVICE_FAVORITES_PLAYBACK_PLAY_POSITION,
+    SERVICE_FAVORITES_PLAYBACK_PLAY_RANDOM,
     SERVICE_FAVORITES_PLAYBACK_SET,
     SERVICE_FAVORITES_PLAYBACK_SKIP,
     SERVICE_FAVORITES_PLAYBACK_START,
@@ -59,6 +65,31 @@ FAVORITES_PLAYBACK_START_SCHEMA = vol.Schema(
         vol.Optional(ATTR_REPLACE_SELECTION, default=True): cv.boolean,
     }
 )
+
+# A separate automation-friendly action; the original queue action is unchanged.
+# Position is 1-based in the same order as the card's Online/Offline tabs.
+FAVORITES_PLAYBACK_PLAY_POSITION_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_KIND): vol.In(("online", "offline")),
+        vol.Required(ATTR_POSITION): vol.All(vol.Coerce(int), vol.Range(min=1, max=1000)),
+        vol.Required(ATTR_MEDIA_PLAYERS): media_player_entities,
+        vol.Optional(ATTR_PLAY_MODE, default="single"): vol.In(("single", "continue")),
+        vol.Optional(ATTR_REPEAT_MODE, default="off"): vol.In(("off", "one", "all")),
+        vol.Optional(ATTR_REPLACE_SELECTION, default=False): cv.boolean,
+    }
+)
+
+# Draw a fresh single track on every action call; no queue or position needed.
+# No filesystem or network work is performed by this module at setup time.
+FAVORITES_PLAYBACK_PLAY_RANDOM_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_KIND): vol.In(("online", "offline")),
+        vol.Required(ATTR_MEDIA_PLAYERS): media_player_entities,
+        vol.Optional(ATTR_REPEAT_MODE, default="off"): vol.In(("off", "one", "all")),
+        vol.Optional(ATTR_REPLACE_SELECTION, default=False): cv.boolean,
+    }
+)
+
 
 FAVORITES_PLAYBACK_SKIP_SCHEMA = vol.Schema(
     {vol.Required(ATTR_DIRECTION): vol.In(("previous", "next", "current"))}
@@ -119,6 +150,119 @@ def async_register_favorites_services(hass: HomeAssistant) -> None:
                 translation_placeholders={"error": str(err)},
             ) from err
 
+    async def async_favorites_playback_play_position(call: ServiceCall) -> ServiceResponse | None:
+        """Play a catalog item by its 1-based visual position, without manual IDs.
+
+        Online uses the stored Favorites ordering (newest first); Offline uses
+        the cached library scan ordering (newest files first). No I/O happens
+        until this action is invoked, so integration startup stays unchanged.
+        """
+        kind = call.data[ATTR_KIND]
+        position = call.data[ATTR_POSITION]
+        try:
+            if kind == "online":
+                items = await get_favorites_store(hass).async_list()
+                keys = favorite_keys(
+                    [item["url"] for item in items if isinstance(item.get("url"), str)]
+                )
+            else:
+                items = await get_playback_manager(hass).async_scan_library(force=False)
+                keys = favorite_keys(
+                    [item["id"] for item in items if isinstance(item.get("id"), str)]
+                )
+            if position > len(keys):
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="favorite_position_invalid",
+                    translation_placeholders={
+                        "position": str(position), "count": str(len(keys))
+                    },
+                )
+
+            play_mode = call.data[ATTR_PLAY_MODE]
+            queue = [keys[position - 1]] if play_mode == "single" else keys
+            state = await get_favorites_playback_controller(hass).async_start_queue(
+                kind=kind,
+                queue=queue,
+                media_players=call.data[ATTR_MEDIA_PLAYERS],
+                repeat_mode=call.data[ATTR_REPEAT_MODE],
+                replace_selection=call.data[ATTR_REPLACE_SELECTION],
+                start_index=0 if play_mode == "single" else position - 1,
+            )
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="play_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        # Optional response is essential for regular automations/scripts: they
+        # must be able to play music without declaring a response_variable.
+        if not call.return_response:
+            return None
+        return {
+            **state,
+            "selected_position": position,
+            "selected_key": keys[position - 1],
+            "total_items": len(keys),
+        }
+
+    async def async_favorites_playback_play_random(call: ServiceCall) -> ServiceResponse | None:
+        """Pick exactly one random Favorite on demand and play it.
+
+        A fresh choice is made for every invocation. The checked Favorites in
+        the dashboard are not changed unless explicitly requested. No extra
+        work is scheduled on the Home Assistant startup path.
+        """
+        kind = call.data[ATTR_KIND]
+        try:
+            if kind == "online":
+                items = await get_favorites_store(hass).async_list()
+                keys = favorite_keys(
+                    [item["url"] for item in items
+                     if isinstance(item, dict) and isinstance(item.get("url"), str)]
+                )
+            else:
+                items = await get_playback_manager(hass).async_scan_library(force=False)
+                keys = favorite_keys(
+                    [item["id"] for item in items
+                     if isinstance(item, dict) and isinstance(item.get("id"), str)]
+                )
+            if not keys:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="favorite_random_empty",
+                    translation_placeholders={"kind": kind},
+                )
+
+            selected_key = random.choice(keys)
+            state = await get_favorites_playback_controller(hass).async_start_queue(
+                kind=kind,
+                queue=[selected_key],
+                start_index=0,
+                media_players=call.data[ATTR_MEDIA_PLAYERS],
+                repeat_mode=call.data[ATTR_REPEAT_MODE],
+                replace_selection=call.data[ATTR_REPLACE_SELECTION],
+            )
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="play_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+
+        if not call.return_response:
+            return None
+        return {
+            **state,
+            "selected_position": keys.index(selected_key) + 1,
+            "selected_key": selected_key,
+            "total_items": len(keys),
+        }
+
     async def async_favorites_playback_skip(call: ServiceCall) -> ServiceResponse:
         try:
             return await get_favorites_playback_controller(hass).async_skip(
@@ -177,6 +321,20 @@ def async_register_favorites_services(hass: HomeAssistant) -> None:
         async_favorites_playback_start,
         schema=FAVORITES_PLAYBACK_START_SCHEMA,
         supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FAVORITES_PLAYBACK_PLAY_POSITION,
+        async_favorites_playback_play_position,
+        schema=FAVORITES_PLAYBACK_PLAY_POSITION_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FAVORITES_PLAYBACK_PLAY_RANDOM,
+        async_favorites_playback_play_random,
+        schema=FAVORITES_PLAYBACK_PLAY_RANDOM_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN,

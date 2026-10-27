@@ -128,6 +128,212 @@
       "name": "Get playback targets",
       "description": "Returns the speakers, DLNA renderers and TVs selected in the integration options.",
       "fields": {}
+    },
+    "favorites_playback_play_position": {
+      "name": "Play favorite by position",
+      "description": "Play a saved Online favorite or an Offline library track by 1-based position. Order matches the card: Online newest saved first, Offline newest file first. Useful in any automation without a manual queue.",
+      "fields": {
+        "kind": {
+          "name": "Favorites category",
+          "description": "Online saved YouTube favorites or Offline library tracks."
+        },
+        "position": {
+          "name": "Song position (starting at 1)",
+          "description": "Position in the full corresponding Favorites tab, counting from 1. For example, 3 plays the third item."
+        },
+        "media_players": {
+          "name": "Media players",
+          "description": "One or more Home Assistant media players for playback."
+        },
+        "play_mode": {
+          "name": "Playback mode",
+          "description": "Single: play only this song. Continue: start at this song and then play the remaining favorites in their displayed order."
+        },
+        "repeat_mode": {
+          "name": "Repeat mode",
+          "description": "Off: stop at the end. One: repeat the current song. All: repeat the queue (Continue mode loops back to the first favorite)."
+        },
+        "replace_selection": {
+          "name": "Replace checked favorites",
+          "description": "When enabled, replace the dashboard's selected favorites and repeat setting with this queue. Off by default to preserve the dashboard selection."
+        }
+      }
+    },
+    "favorites_playback_start": {
+      "name": "Start favorites queue",
+      "description": "Start an explicit list of saved favorite URLs (Online) or library file IDs (Offline) in the specified order; typically invoked by the dashboard card.",
+      "fields": {
+        "queue": {
+          "name": "Queue",
+          "description": "Ordered URL list (Online) or file ID list (Offline). Use Play favorite by position instead if you want to select a numbered song."
+        },
+        "kind": {
+          "name": "Favorites type",
+          "description": "Online (saved URLs) or Offline (library file IDs)."
+        },
+        "media_players": {
+          "name": "Media players",
+          "description": "One or more Home Assistant media player entities."
+        },
+        "repeat_mode": {
+          "name": "Repeat mode",
+          "description": "Off, repeat current song, or repeat the complete queue."
+        },
+        "replace_selection": {
+          "name": "Replace selected favorites",
+          "description": "Whether to replace saved checkbox selection with the supplied queue."
+        }
+      }
+    },
+    "download_video": {
+      "name": "Download video",
+      "description": "Download a video with video-only settings.",
+      "fields": {
+        "url": {
+          "name": "Media URL",
+          "description": "HTTP(S) URL of the media to play or download."
+        },
+        "video_quality": {
+          "name": "Video quality",
+          "description": "Preferred video resolution."
+        },
+        "video_format": {
+          "name": "Video format",
+          "description": "Video container format."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Replace an existing downloaded file."
+        },
+        "wait_for_completion": {
+          "name": "Wait for completion",
+          "description": "Wait for the download job to finish before this action returns."
+        }
+      }
+    },
+    "download_audio": {
+      "name": "Download audio",
+      "description": "Extract audio with audio-only settings.",
+      "fields": {
+        "url": {
+          "name": "Media URL",
+          "description": "HTTP(S) URL of the media to play or download."
+        },
+        "audio_format": {
+          "name": "Audio format",
+          "description": "Audio output format."
+        },
+        "audio_quality": {
+          "name": "Audio quality",
+          "description": "Preferred audio bitrate."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Replace an existing downloaded file."
+        },
+        "wait_for_completion": {
+          "name": "Wait for completion",
+          "description": "Wait for the download job to finish before this action returns."
+        }
+      }
+    },
+    "get_job": {
+      "name": "Get download job",
+      "description": "Get progress and result details for a download job by ID.",
+      "fields": {
+        "job_id": {
+          "name": "Job ID",
+          "description": "Identifier returned by a download action."
+        }
+      }
+    },
+    "play_multi": {
+      "name": "Play YouTube on multiple players",
+      "description": "Play a media URL on one or more media player entities.",
+      "fields": {
+        "url": {
+          "name": "Media URL",
+          "description": "HTTP(S) URL of the media to play or download."
+        },
+        "media_players": {
+          "name": "Media players",
+          "description": "One or more Home Assistant media player entities."
+        }
+      }
+    },
+    "favorites_playback_get": {
+      "name": "Get favorites playback state",
+      "description": "Return the saved selections, repeat settings and active playback queue.",
+      "fields": {}
+    },
+    "favorites_playback_set": {
+      "name": "Set favorites playback selections",
+      "description": "Save selected favorite identifiers and repeat mode for the media card.",
+      "fields": {
+        "online_selected": {
+          "name": "Selected Online favorites",
+          "description": "List of saved Online favorite URLs to check in the card."
+        },
+        "offline_selected": {
+          "name": "Selected Offline favorites",
+          "description": "List of Offline library file IDs to check in the card."
+        },
+        "repeat_mode": {
+          "name": "Repeat mode",
+          "description": "Off, repeat current song, or repeat the complete queue."
+        }
+      }
+    },
+    "favorites_playback_skip": {
+      "name": "Skip favorites playback",
+      "description": "Jump to the previous, next or current song of an active favorites queue.",
+      "fields": {
+        "direction": {
+          "name": "Skip direction",
+          "description": "Previous song, next song, or replay current song."
+        }
+      }
+    },
+    "favorites_playback_stop": {
+      "name": "Stop favorites playback",
+      "description": "Stop the active favorites queue and clear selections.",
+      "fields": {}
+    },
+    "play_targets": {
+      "name": "Play media on configured targets",
+      "description": "Play a media URL on multiple media players, using their configured target types.",
+      "fields": {
+        "url": {
+          "name": "Media URL",
+          "description": "HTTP(S) URL of the media to play or download."
+        },
+        "media_players": {
+          "name": "Media players",
+          "description": "One or more Home Assistant media player entities."
+        }
+      }
+    },
+    "favorites_playback_play_random": {
+      "name": "Play one random favorite",
+      "description": "Each invocation randomly picks one track from all Online favorites or Offline library files. No queue, position, or checked selection is needed.",
+      "fields": {
+        "kind": {
+          "name": "Favorites type",
+          "description": "Online saved URLs or Offline library tracks."
+        },
+        "media_players": {
+          "name": "Media players",
+          "description": "One or more Home Assistant media players."
+        },
+        "repeat_mode": {
+          "name": "Repeat mode",
+          "description": "Off (default) plays one track and stops; one/all repeats the selected track."
+        },
+        "replace_selection": {
+          "name": "Replace checked favorites",
+          "description": "Off by default: preserve the checked favorites in the card."
+        }
+      }
     }
   },
   "exceptions": {
@@ -154,6 +360,12 @@
     },
     "favorite_failed": {
       "message": "Unable to update online favorites: {error}"
+    },
+    "favorite_position_invalid": {
+      "message": "Requested favorite position {position} is not available; there are {count} items."
+    },
+    "favorite_random_empty": {
+      "message": "There are no {kind} favorites available for random playback."
     }
   },
   "options": {

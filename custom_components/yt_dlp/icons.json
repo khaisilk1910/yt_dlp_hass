@@ -33,6 +33,9 @@
     },
     "favorites_remove": {
       "service": "mdi:heart-minus-outline"
+    },
+    "favorites_playback_play_position": {
+      "service": "mdi:playlist-play"
     }
   }
 }
