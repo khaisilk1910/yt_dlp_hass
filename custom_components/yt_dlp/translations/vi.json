@@ -314,6 +314,150 @@
       "name": "Lấy danh sách thiết bị phát",
       "description": "Trả về các loa/DLNA/tivi mà người dùng đã thêm trong cấu hình tích hợp.",
       "fields": {}
+    },
+    "favorites_playback_play_position": {
+      "name": "Phát bài yêu thích theo số thứ tự",
+      "description": "Phát bài trong Yêu thích Online hoặc thư viện Offline theo vị trí bắt đầu từ 1. Thứ tự giống thẻ: Online mới lưu lên trước, Offline tệp mới nhất lên trước. Dùng được trong mọi automation mà không cần nhập queue.",
+      "fields": {
+        "kind": {
+          "name": "Loại yêu thích",
+          "description": "Online là danh sách liên kết YouTube đã lưu; Offline là danh sách bài trong thư viện nhạc."
+        },
+        "position": {
+          "name": "Số thứ tự bài (bắt đầu từ 1)",
+          "description": "Vị trí trong toàn bộ danh sách ở tab tương ứng, tính từ 1. Ví dụ: 3 là bài thứ ba."
+        },
+        "media_players": {
+          "name": "Thiết bị phát",
+          "description": "Một hoặc nhiều media_player của Home Assistant."
+        },
+        "play_mode": {
+          "name": "Kiểu phát",
+          "description": "single: chỉ phát bài được chọn. continue: phát từ bài được chọn rồi đến các bài tiếp theo theo thứ tự hiển thị."
+        },
+        "repeat_mode": {
+          "name": "Chế độ lặp",
+          "description": "off: không lặp; one: lặp bài hiện tại; all: lặp danh sách phát (kiểu continue sẽ quay về bài đầu tiên)."
+        },
+        "replace_selection": {
+          "name": "Thay thế các bài đang tích chọn",
+          "description": "Bật để cập nhật danh sách tích chọn và chế độ lặp của dashboard. Mặc định tắt để giữ nguyên lựa chọn hiện tại."
+        }
+      }
+    },
+    "favorites_playback_start": {
+      "name": "Bắt đầu hàng đợi nhạc yêu thích",
+      "description": "Phát danh sách URL yêu thích Online hoặc ID file Offline theo đúng thứ tự đã cung cấp; thường do thẻ dashboard gọi.",
+      "fields": {
+        "queue": {
+          "name": "Danh sách phát",
+          "description": "Danh sách URL (Online) hoặc ID file (Offline) theo thứ tự phát. Dùng action Phát bài yêu thích theo số thứ tự nếu muốn chọn bằng số."
+        },
+        "kind": {
+          "name": "Loại yêu thích",
+          "description": "Online (URL đã lưu) hoặc Offline (ID file thư viện)."
+        },
+        "media_players": {
+          "name": "Thiết bị phát",
+          "description": "Một hoặc nhiều thực thể media_player của Home Assistant."
+        },
+        "repeat_mode": {
+          "name": "Chế độ lặp",
+          "description": "Không lặp, lặp một bài hoặc lặp toàn bộ hàng đợi."
+        },
+        "replace_selection": {
+          "name": "Thay thế bài tích chọn",
+          "description": "Có thay các bài được tích chọn hiện tại bằng danh sách phát mới không."
+        }
+      }
+    },
+    "play_multi": {
+      "name": "Phát YouTube trên nhiều thiết bị",
+      "description": "Phát một URL media đồng thời trên một hoặc nhiều media player.",
+      "fields": {
+        "url": {
+          "name": "URL media",
+          "description": "Liên kết HTTP(S) của media cần phát hoặc tải."
+        },
+        "media_players": {
+          "name": "Thiết bị phát",
+          "description": "Một hoặc nhiều thực thể media_player của Home Assistant."
+        }
+      }
+    },
+    "favorites_playback_get": {
+      "name": "Lấy trạng thái phát yêu thích",
+      "description": "Trả về các bài đã tích, thiết lập lặp và danh sách phát hiện tại.",
+      "fields": {}
+    },
+    "favorites_playback_set": {
+      "name": "Lưu lựa chọn phát yêu thích",
+      "description": "Lưu danh sách bài tích chọn cùng chế độ lặp của thẻ Media Center.",
+      "fields": {
+        "online_selected": {
+          "name": "Đã chọn Online",
+          "description": "Danh sách URL yêu thích Online được tích chọn trên thẻ."
+        },
+        "offline_selected": {
+          "name": "Đã chọn Offline",
+          "description": "Danh sách ID file thư viện Offline được tích chọn trên thẻ."
+        },
+        "repeat_mode": {
+          "name": "Chế độ lặp",
+          "description": "Không lặp, lặp một bài hoặc lặp toàn bộ hàng đợi."
+        }
+      }
+    },
+    "favorites_playback_skip": {
+      "name": "Chuyển bài yêu thích",
+      "description": "Chuyển tới bài trước, bài tiếp hoặc phát lại bài hiện tại.",
+      "fields": {
+        "direction": {
+          "name": "Hướng chuyển bài",
+          "description": "Bài trước, bài tiếp hoặc phát lại bài hiện tại."
+        }
+      }
+    },
+    "favorites_playback_stop": {
+      "name": "Dừng phát yêu thích",
+      "description": "Dừng danh sách phát hiện tại và bỏ tích chọn bài yêu thích.",
+      "fields": {}
+    },
+    "play_targets": {
+      "name": "Phát trên thiết bị đã cấu hình",
+      "description": "Phát URL media trên nhiều thiết bị, tương thích loại mục tiêu đã cấu hình.",
+      "fields": {
+        "url": {
+          "name": "URL media",
+          "description": "Liên kết HTTP(S) của media cần phát hoặc tải."
+        },
+        "media_players": {
+          "name": "Thiết bị phát",
+          "description": "Một hoặc nhiều thực thể media_player của Home Assistant."
+        }
+      }
+    },
+    "favorites_playback_play_random": {
+      "name": "Phát ngẫu nhiên 1 bài yêu thích",
+      "description": "Mỗi lần nhấn Play hoặc chạy action sẽ chọn lại ngẫu nhiên một bài từ toàn bộ Yêu thích Online hoặc thư viện Offline. Không yêu cầu nhập queue, số thứ tự hay tích chọn bài trước.",
+      "fields": {
+        "kind": {
+          "name": "Loại yêu thích",
+          "description": "Online: liên kết YouTube đã lưu. Offline: bài trong thư viện nhạc."
+        },
+        "media_players": {
+          "name": "Thiết bị phát",
+          "description": "Một hoặc nhiều loa/thiết bị media_player."
+        },
+        "repeat_mode": {
+          "name": "Chế độ lặp",
+          "description": "Mặc định off: chỉ phát một bài rồi dừng. one/all sẽ lặp bài đã chọn."
+        },
+        "replace_selection": {
+          "name": "Thay thế các bài đang tích chọn",
+          "description": "Mặc định tắt: giữ nguyên các bài đang tích chọn trên thẻ."
+        }
+      }
     }
   },
   "exceptions": {
@@ -337,6 +481,12 @@
     },
     "favorite_failed": {
       "message": "Không thể cập nhật danh sách yêu thích online: {error}"
+    },
+    "favorite_position_invalid": {
+      "message": "Không có bài ở vị trí {position}; danh sách hiện có {count} bài."
+    },
+    "favorite_random_empty": {
+      "message": "Không có bài nào trong Yêu thích {kind} để phát ngẫu nhiên."
     }
   },
   "selector": {
