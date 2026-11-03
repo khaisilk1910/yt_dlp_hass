@@ -25,7 +25,13 @@ from homeassistant.const import EVENT_CALL_SERVICE, EVENT_STATE_CHANGED
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, SERVICE_PLAY, SERVICE_PLAY_MULTI, STATE_FAVORITES_PLAYBACK
+from .const import (
+    DOMAIN,
+    SERVICE_PLAY,
+    SERVICE_PLAY_MULTI,
+    STATE_FAVORITES_PLAYBACK,
+    TARGET_TYPE_DLNA,
+)
 from .favorites import FavoritesStore
 from .playback import PlaybackManager
 
@@ -526,7 +532,7 @@ class FavoritesPlaybackController:
             )
 
     async def _async_stop_stale_players(
-        self, players: list[str], expected_content_id: str
+        self, players: list[str], expected_content_id: str | dict[str, str]
     ) -> None:
         """Stop only players that still expose the stale request's media id.
 
@@ -539,7 +545,12 @@ class FavoritesPlaybackController:
             if state is None:
                 continue
             content_id = state.attributes.get(ATTR_MEDIA_CONTENT_ID)
-            if isinstance(content_id, str) and content_id == expected_content_id:
+            expected = (
+                expected_content_id.get(entity_id)
+                if isinstance(expected_content_id, dict)
+                else expected_content_id
+            )
+            if isinstance(content_id, str) and expected and content_id == expected:
                 stale_players.append(entity_id)
         if not stale_players:
             return
@@ -568,19 +579,65 @@ class FavoritesPlaybackController:
         if info.thumbnail:
             metadata["images"] = [{"url": info.thumbnail}]
 
-        await self.hass.services.async_call(
-            "media_player",
-            SERVICE_PLAY_MEDIA,
-            service_data={
-                ATTR_MEDIA_CONTENT_ID: media_source_id,
-                ATTR_MEDIA_CONTENT_TYPE: info.mime_type,
-                ATTR_MEDIA_EXTRA: {"metadata": metadata},
-            },
-            target={"entity_id": players},
-            blocking=True,
-        )
+        # A DLNA DMR needs a LAN-reachable HTTP MP3 URL; handing it the same
+        # media-source stream used by Cast can leave it with an unsupported
+        # YouTube container or unreachable URL. Keep non-DLNA playback intact.
+        from .media_targets import platform_for_entity, target_type_for_entity
+
+        dlna_players = [
+            entity_id
+            for entity_id in players
+            if platform_for_entity(self.hass, entity_id) == "dlna_dmr"
+            or target_type_for_entity(self.hass, entity_id) == TARGET_TYPE_DLNA
+        ]
+        regular_players = [
+            entity_id for entity_id in players if entity_id not in dlna_players
+        ]
+        played_ids: dict[str, str] = {}
+
+        if regular_players:
+            await self.hass.services.async_call(
+                "media_player",
+                SERVICE_PLAY_MEDIA,
+                service_data={
+                    ATTR_MEDIA_CONTENT_ID: media_source_id,
+                    ATTR_MEDIA_CONTENT_TYPE: info.mime_type,
+                    ATTR_MEDIA_EXTRA: {"metadata": metadata},
+                },
+                target={"entity_id": regular_players},
+                blocking=True,
+            )
+            played_ids.update(dict.fromkeys(regular_players, media_source_id))
+
+        if dlna_players:
+            from .target_services import (
+                async_prepare_dlna_stream,
+                async_play_prepared_dlna,
+            )
+
+            if not await self._async_session_is_current(generation, "online", url, players):
+                await self._async_stop_stale_players(list(played_ids), played_ids)
+                return
+            relay_path = await async_prepare_dlna_stream(
+                self.hass, self.playback, media_source_id
+            )
+            for entity_id in dlna_players:
+                if not await self._async_session_is_current(
+                    generation, "online", url, players
+                ):
+                    await self._async_stop_stale_players(list(played_ids), played_ids)
+                    return
+                _method, relay_url = await async_play_prepared_dlna(
+                    self.hass,
+                    entity_id,
+                    relay_path=relay_path,
+                    title=info.title,
+                    artist=info.artist,
+                )
+                played_ids[entity_id] = relay_url
+
         if not await self._async_session_is_current(generation, "online", url, players):
-            await self._async_stop_stale_players(players, media_source_id)
+            await self._async_stop_stale_players(list(played_ids), played_ids)
             return
         for entity_id in players:
             self.playback.async_track_remote_playback(entity_id, url, info, media_source_id)
