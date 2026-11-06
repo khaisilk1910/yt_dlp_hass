@@ -1,4 +1,4 @@
 {
-  "name": "Youtube DLP",
-  "render_readme": true
+  "name": "YouTube-DLP",
+  "homeassistant": "2026.11.0"
 }

@@ -26,18 +26,24 @@ Tích hợp **YouTube-DLP** cho phép tìm kiếm và tải video hoặc âm tha
 - Thẻ hỗ trợ lưu **nhạc yêu thích** bền vững trong Home Assistant, có ảnh thu nhỏ, thông tin bài, nút phát và phân trang.
 - Có thể chọn một hoặc nhiều loa mặc định để phát cùng lúc, chỉnh tiêu đề thẻ và chọn 10 mẫu màu ngay trong trình chỉnh sửa UI của thẻ; giao diện tự thích nghi với theme sáng/tối.
 
-## Cài đặt qua HACS
+## Cài đặt qua Marketplace (Home Assistant 2026.11 trở lên)
 
-Nhấn nút dưới đây để mở trực tiếp repository này trong HACS:
+[![Mở repository trên Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=khaisilk1910&repository=yt_dlp_hass&category=integration)
 
-[![Mở repository trong HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=khaisilk1910&repository=yt_dlp_hass&category=integration)
+1. Vào **Settings → Marketplace**. Nếu chưa thấy repository, kết nối GitHub và chọn **Custom repositories** để thêm `https://github.com/khaisilk1910/yt_dlp_hass` (loại **Integration**).
+2. Cài đặt **YouTube-DLP**. Với bản cập nhật tích hợp đã tải trước đó, thực hiện khởi động lại khi Marketplace yêu cầu ở **Settings → System → Repairs**.
+3. Vào **Settings → Devices & services → Add integration**, tìm **YouTube-DLP**, rồi cấu hình thư mục tải và thư viện.
+4. Vào **Configure** của tích hợp để quản lý thông báo và danh sách loa/TV/DLNA. Thẻ **YouTube-DLP Media Player** có thể chọn từ trình thêm thẻ trong dashboard; các tuỳ chỉnh tiêu đề/màu có editor trực quan.
 
-Sau đó:
+**Lưu ý:** Home Assistant 2026.11 tích hợp HACS vào Marketplace; không cần cài một bản HACS custom integration riêng. Bản phát hành này nhắm tới Home Assistant 2026.11+ và đặt phiên bản tối thiểu tương ứng trong `hacs.json`. Không thay đổi dữ liệu favourites hoặc các Action đang sử dụng.
 
-1. Chọn **Download** trong HACS để cài đặt tích hợp.
-2. Khởi động lại Home Assistant.
-3. Vào **Settings → Devices & services → Add integration**.
-4. Tìm **YouTube-DLP** và hoàn tất cấu hình theo giao diện.
+### Chẩn đoán và log
+
+- Vào **Settings → Devices & services → YouTube-DLP → Download diagnostics**. File chẩn đoán cho biết phiên bản HA/integration, số tác vụ và trạng thái, số stream đang mở, trạng thái các tính năng, nhưng **không xuất URL video, stream token, đường dẫn thư mục hay thông tin thông báo**.
+- Bật **Enable debug logging** trên trang tích hợp nếu cần điều tra lỗi. Xem các log `custom_components.yt_dlp` hoặc `homeassistant.components.yt_dlp` trong **Settings → System → Logs**.
+- Khi khởi động, phần lõi chỉ tạo runtime trong bộ nhớ; tác vụ FFmpeg/JavaScript/đọc thư viện chỉ được gọi khi cần. Một dòng log sau startup cho biết từng thành phần đã sẵn sàng/thất bại và thời gian chạy; lỗi phụ trợ không được phép chặn lõi.
+- Sau cập nhật, hãy tải lại giao diện bằng cách làm mới mạnh (hard refresh) nếu trình duyệt còn cache JS cũ.
+
 
 ## Cài đặt thủ công
 
