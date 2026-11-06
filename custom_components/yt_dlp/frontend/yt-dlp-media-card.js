@@ -197,6 +197,9 @@ class YtDlpMediaCard extends HTMLElement {
       background_opacity: 100,
       ...(config || {}),
     };
+    const opacity = Number(this._config.background_opacity);
+    this._config.background_opacity = Number.isFinite(opacity)
+      ? Math.max(0, Math.min(100, opacity)) : 100;
     // Playback targets are managed in the integration options, not per card.
     this._render();
   }
@@ -573,7 +576,9 @@ class YtDlpMediaCard extends HTMLElement {
   _position(state) {
     const attrs = state?.attributes || {};
     let position = Number(attrs.media_position || 0);
-    const duration = Number(attrs.media_duration || 0);
+    const rawDuration = Number(attrs.media_duration || 0);
+    const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
+    if (!Number.isFinite(position) || position < 0) position = 0;
     const updatedAt = attrs.media_position_updated_at;
     if (state?.state === "playing" && updatedAt) {
       const stamp = Date.parse(updatedAt);
@@ -851,7 +856,7 @@ class YtDlpMediaCard extends HTMLElement {
         </div>
         <div class="transport favorites-transport">
           <div class="progress-head"><span id="elapsed">${this._formatTime(position)}</span><span id="duration">${this._formatTime(duration)}</span></div>
-          <input id="progress" class="range progress" type="range" min="0" max="${duration || 1}" step="1" value="${Math.min(position, duration || 1)}" style="--value:${progress}%" ${duration ? "" : "disabled"}>
+          <input id="progress" aria-label="Tiến trình phát" class="range progress" type="range" min="0" max="${duration || 1}" step="1" value="${Math.min(position, duration || 1)}" style="--value:${progress}%" ${duration ? "" : "disabled"}>
           <div class="controls">
             <button class="icon-btn" id="previous" title="Bài trước">${this._icon("skip-previous")}</button>
             <button class="icon-btn" id="stop" title="Dừng và xóa lựa chọn Yêu thích">${this._icon("stop")}</button>
@@ -863,7 +868,7 @@ class YtDlpMediaCard extends HTMLElement {
           </div>
           <div class="volume-row">
             ${this._icon("volume-low")}
-            <input id="volume" class="range" type="range" min="0" max="100" value="${volume}" style="--value:${volume}%">
+            <input id="volume" aria-label="Âm lượng" class="range" type="range" min="0" max="100" value="${volume}" style="--value:${volume}%">
             <span>${volume}%</span>
           </div>
         </div>
@@ -2825,10 +2830,16 @@ class YtDlpMediaCard extends HTMLElement {
     const slider = this.shadowRoot.getElementById("progress");
     if (elapsed) elapsed.textContent = this._formatTime(position);
     if (durationEl) durationEl.textContent = this._formatTime(duration);
-    if (slider && duration > 0 && this.shadowRoot.activeElement !== slider) {
-      slider.max = duration;
-      slider.value = Math.min(position, duration);
-      slider.style.setProperty("--value", `${Math.min(100, (position / duration) * 100)}%`);
+    if (slider) {
+      // DLNA players may publish the duration after the first state update.
+      // A slider initially rendered disabled must become usable automatically.
+      slider.disabled = !(duration > 0);
+      slider.max = duration > 0 ? duration : 1;
+      slider.setAttribute("aria-valuetext", `${this._formatTime(position)} / ${this._formatTime(duration)}`);
+      if (this.shadowRoot.activeElement !== slider) {
+        slider.value = duration > 0 ? Math.min(position, duration) : 0;
+        slider.style.setProperty("--value", `${duration > 0 ? Math.min(100, (position / duration) * 100) : 0}%`);
+      }
     }
   }
 
@@ -2903,6 +2914,7 @@ if (!window.customCards.some((card) => card.type === CARD_TAG)) {
     type: CARD_TAG,
     name: "YouTube-DLP Media Player",
     description: "Phát YouTube, Yêu thích Online/Offline, điều khiển loa và tải video/audio trực tiếp từ dashboard.",
+    documentationURL: "https://github.com/khaisilk1910/yt_dlp_hass",
     preview: true,
   });
 }
