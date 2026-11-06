@@ -101,7 +101,7 @@ class DlnaPlaybackManager:
         source_key = f"remote:{session.source_url}"
         async with self._lock:
             await self._async_prune_locked()
-            if cached := self._get_cached_locked(source_key):
+            if cached := await self._async_get_cached_locked(source_key):
                 return self._url_for(cached.token)
 
             await self._async_ensure_cache_dir()
@@ -140,7 +140,7 @@ class DlnaPlaybackManager:
 
         async with self._lock:
             await self._async_prune_locked()
-            if cached := self._get_cached_locked(source_key):
+            if cached := await self._async_get_cached_locked(source_key):
                 return self._url_for(cached.token)
 
             await self._async_ensure_cache_dir()
@@ -177,14 +177,12 @@ class DlnaPlaybackManager:
             await self._async_prune_locked()
             return self._url_for(token)
 
-    def get_file(self, token: str) -> Path | None:
-        """Return a prepared MP3 path for an HTTP request."""
+    async def async_get_file(self, token: str) -> Path | None:
+        """Find a cached MP3 without blocking the event loop on disk I/O."""
         item = self._items_by_token.get(token)
-        if item is None:
+        if item is None or time.monotonic() - item.last_access > _DLNA_CACHE_TTL_SECONDS:
             return None
-        if time.monotonic() - item.last_access > _DLNA_CACHE_TTL_SECONDS:
-            return None
-        if not item.path.is_file():
+        if not await self.hass.async_add_executor_job(item.path.is_file):
             return None
         item.last_access = time.monotonic()
         return item.path
@@ -451,20 +449,22 @@ class DlnaPlaybackManager:
             self._cache_dir.mkdir, 0o700, True, True
         )
 
-    def _get_cached_locked(self, source_key: str) -> DlnaCacheItem | None:
+    async def _async_get_cached_locked(self, source_key: str) -> DlnaCacheItem | None:
         item = self._items_by_source.get(source_key)
-        if item is None or not item.path.is_file():
+        if item is None or not await self.hass.async_add_executor_job(item.path.is_file):
             return None
         item.last_access = time.monotonic()
         return item
 
     async def _async_prune_locked(self) -> None:
         now = time.monotonic()
-        expired = [
-            item
-            for item in self._items_by_token.values()
-            if now - item.last_access > _DLNA_CACHE_TTL_SECONDS or not item.path.is_file()
-        ]
+        # Batching the existence checks into one worker avoids blocking the
+        # event loop when a mounted library/NAS is slow or briefly offline.
+        items = tuple(self._items_by_token.values())
+        expired = (
+            await self.hass.async_add_executor_job(_stale_dlna_items, items, now)
+            if items else []
+        )
         remaining = len(self._items_by_token) - len(expired)
         if remaining > _MAX_DLNA_CACHE_ITEMS:
             keep = {
@@ -521,7 +521,7 @@ class YoutubeDlpDlnaView(HomeAssistantView):
         from .dlna_runtime import get_dlna_manager
 
         manager = get_dlna_manager(hass)
-        path = manager.get_file(token)
+        path = await manager.async_get_file(token)
         if path is None:
             raise web.HTTPNotFound(text="DLNA playback cache has expired")
         return path
@@ -568,6 +568,14 @@ def _resolve_ffmpeg_binary(hint: str) -> str | None:
     if candidate.is_file():
         return str(candidate.resolve())
     return shutil.which(hint) or shutil.which("ffmpeg")
+
+
+def _stale_dlna_items(items: tuple[DlnaCacheItem, ...], now: float) -> list[DlnaCacheItem]:
+    """Read cache file state in an executor, never in an async handler."""
+    return [
+        item for item in items
+        if now - item.last_access > _DLNA_CACHE_TTL_SECONDS or not item.path.is_file()
+    ]
 
 
 def _valid_media_size(path: Path) -> int:

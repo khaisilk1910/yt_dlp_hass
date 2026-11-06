@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from homeassistant.components.frontend import add_extra_js_url, remove_extra_js_url
 from homeassistant.components.http import StaticPathConfig
@@ -19,12 +20,12 @@ DATA_STATIC_REGISTERED = f"{DOMAIN}_static_registered"
 DATA_EXTRA_MODULE = f"{DOMAIN}_extra_module"
 
 
-async def async_register_media_card(hass: HomeAssistant, version: str) -> None:
+async def async_register_media_card(hass: HomeAssistant, version: str) -> bool:
     """Serve the card and add/update its Lovelace resource with cache busting."""
     card_path = Path(__file__).parent / "frontend" / "yt-dlp-media-card.js"
     if not await hass.async_add_executor_job(card_path.is_file):
         _LOGGER.warning("YouTube-DLP media card bundle is missing: %s", card_path)
-        return
+        return False
 
     versioned_url = f"{CARD_URL}?v={version}"
     try:
@@ -37,7 +38,7 @@ async def async_register_media_card(hass: HomeAssistant, version: str) -> None:
         lovelace = hass.data.get(LOVELACE_DATA)
         if lovelace is None:
             _register_extra_module(hass, versioned_url)
-            return
+            return True
 
         resources = lovelace.resources
         if isinstance(resources, ResourceStorageCollection):
@@ -47,7 +48,7 @@ async def async_register_media_card(hass: HomeAssistant, version: str) -> None:
             matches = [
                 item
                 for item in resources.async_items()
-                if str(item.get("url") or "").startswith(CARD_URL)
+                if urlsplit(str(item.get("url") or "")).path == CARD_URL
             ]
             if matches:
                 primary = matches[0]
@@ -68,7 +69,9 @@ async def async_register_media_card(hass: HomeAssistant, version: str) -> None:
                 # Keep exactly one managed resource so every update has one URL.
                 for duplicate in matches[1:]:
                     await resources.async_delete_item(duplicate["id"])
-                return
+                async_unregister_extra_media_card(hass)
+                _LOGGER.debug("YouTube-DLP card resource is ready: %s", versioned_url)
+                return True
 
             await resources.async_create_item(
                 {"res_type": "module", "url": versioned_url}
@@ -77,11 +80,13 @@ async def async_register_media_card(hass: HomeAssistant, version: str) -> None:
                 "Registered YouTube-DLP Lovelace card resource: %s",
                 versioned_url,
             )
-            return
+            async_unregister_extra_media_card(hass)
+            return True
 
         # YAML resources cannot be edited from an integration. Home Assistant's
         # supported extra-module registry keeps the card automatic in that mode.
         _register_extra_module(hass, versioned_url)
+        return True
     except Exception:
         # Frontend convenience must never make the downloader integration fail.
         # The task is deliberately backgrounded by async_setup_entry as well.
@@ -89,6 +94,7 @@ async def async_register_media_card(hass: HomeAssistant, version: str) -> None:
             "Unable to register YouTube-DLP media card automatically; "
             "download and playback services remain available"
         )
+        return False
 
 
 def _register_extra_module(hass: HomeAssistant, versioned_url: str) -> None:
@@ -99,3 +105,10 @@ def _register_extra_module(hass: HomeAssistant, versioned_url: str) -> None:
     if previous != versioned_url:
         add_extra_js_url(hass, versioned_url)
         hass.data[DATA_EXTRA_MODULE] = versioned_url
+
+
+def async_unregister_extra_media_card(hass: HomeAssistant) -> None:
+    """Drop only our transient frontend module; never delete dashboard resources."""
+    previous = hass.data.pop(DATA_EXTRA_MODULE, None)
+    if isinstance(previous, str):
+        remove_extra_js_url(hass, previous)

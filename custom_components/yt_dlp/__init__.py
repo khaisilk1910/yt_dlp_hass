@@ -10,6 +10,8 @@ operation.
 from __future__ import annotations
 
 import logging
+import sys
+import time
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_FILE_PATH
@@ -86,7 +88,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Publish the core runtime without blocking Home Assistant startup."""
     # No filesystem access here. A disconnected NAS/media mount must not be able
     # to turn the config entry into Not loaded during a Home Assistant restart.
@@ -116,11 +118,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(async_at_started(hass, _schedule_post_start))
 
     _LOGGER.info(
-        "YouTube-DLP core ready without startup I/O: output=%s library=%s",
-        download_path,
-        library_path,
+        "YouTube-DLP core ready without startup I/O (separate_library=%s)",
+        library_path != download_path,
     )
-    return True
+    _LOGGER.debug("YouTube-DLP configured paths: output=%s library=%s", download_path, library_path)
+    # A loaded config entry has no background polling or mandatory I/O.
 
 
 async def _async_start_optional_runtime(
@@ -132,6 +134,18 @@ async def _async_start_optional_runtime(
     if getattr(entry, "runtime_data", None) is not manager:
         return
 
+    started = time.monotonic()
+    ready: list[str] = []
+    failures: list[str] = []
+    for key, label in (
+        (_DATA_TARGET_SERVICES, "targets"),
+        (_DATA_TV_VIEW, "tv"),
+        (_DATA_DLNA_VIEW, "dlna_http"),
+        (_DATA_FAVORITES_SERVICES, "favorites_services"),
+    ):
+        if hass.data.get(key):
+            ready.append(label)
+
     # Register optional services/views only after Home Assistant reports that
     # startup has completed. Each layer is independent and idempotent.
     if not hass.data.get(_DATA_TARGET_SERVICES):
@@ -141,7 +155,9 @@ async def _async_start_optional_runtime(
             )
             module.async_register_target_services(hass)
             hass.data[_DATA_TARGET_SERVICES] = True
+            ready.append("targets")
         except Exception:  # noqa: BLE001
+            failures.append("targets")
             _LOGGER.exception(
                 "Managed target services failed after startup; core remains available"
             )
@@ -151,7 +167,9 @@ async def _async_start_optional_runtime(
             module = await async_import_module(hass, f"{__package__}.tv_playback")
             hass.http.register_view(module.YoutubeDlpTvStreamView())
             hass.data[_DATA_TV_VIEW] = True
+            ready.append("tv")
         except Exception:  # noqa: BLE001
+            failures.append("tv")
             _LOGGER.exception(
                 "TV relay failed after startup; core Play/Download remain available"
             )
@@ -161,7 +179,9 @@ async def _async_start_optional_runtime(
             module = await async_import_module(hass, f"{__package__}.dlna")
             hass.http.register_view(module.YoutubeDlpDlnaView())
             hass.data[_DATA_DLNA_VIEW] = True
+            ready.append("dlna_http")
         except Exception:  # noqa: BLE001
+            failures.append("dlna_http")
             _LOGGER.exception(
                 "DLNA relay failed after startup; core Play/Download remain available"
             )
@@ -173,7 +193,9 @@ async def _async_start_optional_runtime(
             )
             module.async_register_favorites_services(hass)
             hass.data[_DATA_FAVORITES_SERVICES] = True
+            ready.append("favorites_services")
         except Exception:  # noqa: BLE001
+            failures.append("favorites_services")
             _LOGGER.exception(
                 "Favorites services failed after startup; core remains available"
             )
@@ -184,7 +206,9 @@ async def _async_start_optional_runtime(
     if isinstance(playback, PlaybackManager):
         try:
             playback.async_start_resume_monitoring()
+            ready.append("resume_monitor")
         except Exception:  # noqa: BLE001
+            failures.append("resume_monitor")
             _LOGGER.exception("Playback resume monitoring failed to start")
 
     # DLNA manager construction is in-memory only. FFmpeg remains lazily resolved
@@ -193,7 +217,9 @@ async def _async_start_optional_runtime(
         module = await async_import_module(hass, f"{__package__}.dlna")
         if getattr(manager, "dlna_manager", None) is None:
             manager.dlna_manager = module.DlnaPlaybackManager(hass, None)
+        ready.append("dlna_runtime")
     except Exception:  # noqa: BLE001
+        failures.append("dlna_runtime")
         _LOGGER.exception(
             "DLNA runtime failed to initialize after startup; core remains available"
         )
@@ -214,7 +240,9 @@ async def _async_start_optional_runtime(
                 hass, entry, manager.playback_manager, manager.favorites_store
             )
         await manager.favorites_playback.async_start()
+        ready.append("favorites_runtime")
     except Exception:  # noqa: BLE001
+        failures.append("favorites_runtime")
         _LOGGER.exception(
             "Favorites runtime failed after startup; core Play/Download remain available"
         )
@@ -228,14 +256,34 @@ async def _async_start_optional_runtime(
         card_version = (
             str(integration_version) if integration_version is not None else VERSION
         )
-        await frontend_module.async_register_media_card(hass, card_version)
+        if getattr(entry, "runtime_data", None) is manager:
+            if await frontend_module.async_register_media_card(hass, card_version):
+                ready.append("lovelace_card")
+            else:
+                failures.append("lovelace_card")
     except Exception:  # noqa: BLE001
+        failures.append("lovelace_card")
         _LOGGER.exception(
             "Dashboard card registration failed after startup; core remains available"
         )
+    finally:
+        elapsed = round(time.monotonic() - started, 3)
+        if getattr(entry, "runtime_data", None) is manager:
+            manager.optional_runtime_status = {
+                "ready": list(ready),
+                "failed": list(failures),
+                "elapsed_seconds": elapsed,
+            }
+        _LOGGER.log(
+            logging.WARNING if failures else logging.INFO,
+            "YouTube-DLP post-start initialization: ready=%s failed=%s elapsed=%.2fs",
+            ",".join(ready) or "none",
+            ",".join(failures) or "none",
+            elapsed,
+        )
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Unload runtime managers without unregistering global services."""
     manager = getattr(entry, "runtime_data", None)
     if isinstance(manager, YoutubeDlpManager):
@@ -264,4 +312,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.states.async_remove(STATE_DOWNLOADER)
     hass.states.async_remove(STATE_FAVORITES_PLAYBACK)
-    return True
+    # The Lovelace storage resource persists across reloads, but extra module
+    # registration must not remain active after the last config entry unloads.
+    if frontend_module := sys.modules.get(f"{__package__}.frontend"):
+        try:
+            frontend_module.async_unregister_extra_media_card(hass)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Could not unregister transient dashboard module")
+    _LOGGER.info("YouTube-DLP config entry unloaded: %s", entry.entry_id)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import logging
 
 import voluptuous as vol
 
@@ -51,6 +52,8 @@ from .helpers import ensure_writable_directory, normalize_download_directory
 from .notifications import mobile_notify_action_label, mobile_notify_actions
 from .media_targets import guess_target_type, media_player_candidates, raw_media_targets
 
+_LOGGER = logging.getLogger(__name__)
+
 _BOOLEAN_SELECTOR = BooleanSelector()
 _TEXT_SELECTOR = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
 
@@ -79,7 +82,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 library_path = normalize_download_directory(
                     str(user_input.get(CONF_MEDIA_LIBRARY_PATH) or path)
                 )
-            except (OSError, ValueError):
+            except (OSError, ValueError) as err:
+                _LOGGER.warning("YouTube-DLP setup directory validation failed: %s", err)
                 errors["base"] = "cannot_create_folder"
             else:
                 await self.async_set_unique_id(f"{DOMAIN}.downloader")
@@ -157,7 +161,8 @@ class OptionsFlowHandler(OptionsFlow):
                 library_path = normalize_download_directory(
                     str(folders_cfg.get(CONF_MEDIA_LIBRARY_PATH) or download_path)
                 )
-            except (OSError, ValueError):
+            except (OSError, ValueError) as err:
+                _LOGGER.warning("YouTube-DLP options directory validation failed: %s", err)
                 errors["base"] = "cannot_create_folder"
 
             normalized = self._normalize_options(user_input)
@@ -203,6 +208,7 @@ class OptionsFlowHandler(OptionsFlow):
                 # constructed. Reload only when a folder actually changed; pure
                 # notification edits remain reload-free.
                 if folders_changed:
+                    _LOGGER.info("YouTube-DLP media directory changed; reloading the config entry")
                     await self.hass.config_entries.async_reload(
                         self.config_entry.entry_id
                     )

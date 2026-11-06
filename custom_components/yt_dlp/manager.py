@@ -1147,14 +1147,14 @@ class YoutubeDlpManager:
             for job in self.jobs.values()
             if job.status not in ("completed", "error", "cancelled")
         ]
-        attributes: dict[str, dict[str, int | float | str]] = {}
+        attributes: dict[str, dict[str, int | float | None]] = {}
         for job in active_jobs:
             if not job.filename:
                 continue
             attributes[job.filename] = {
                 "speed": job.speed or 0,
                 "downloaded": job.downloaded_bytes,
-                "total": job.total_bytes if job.total_bytes is not None else "Nan",
+                "total": job.total_bytes,
                 "eta": job.eta or 0,
             }
 
