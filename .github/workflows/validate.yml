@@ -21,6 +21,14 @@ jobs:
       - name: Compile Python
         run: python3 -m compileall -q custom_components/yt_dlp
 
+      - name: Run backend regression tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Validate and test Lovelace card
+        run: |
+          node --check custom_components/yt_dlp/frontend/yt-dlp-media-card.js
+          node tests/test_card.cjs
+
       - name: Validate JSON, YAML and repository layout
         shell: bash
         run: |
@@ -46,7 +54,7 @@ jobs:
               raise SystemExit("manifest.json keys must be domain, name, then alphabetical")
 
           hacs = json.loads(Path("hacs.json").read_text(encoding="utf-8"))
-          if hacs != {"name": "Youtube DLP", "render_readme": True}:
+          if hacs != {"name": "YouTube-DLP", "homeassistant": "2026.11.0"}:
               raise SystemExit(f"Unexpected hacs.json content: {hacs!r}")
 
           if (root / "strings.json").exists():

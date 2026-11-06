@@ -84,6 +84,14 @@ jobs:
       - name: Compile Python
         run: python3 -m compileall -q custom_components/yt_dlp
 
+      - name: Run backend regression tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Validate and test Lovelace card
+        run: |
+          node --check custom_components/yt_dlp/frontend/yt-dlp-media-card.js
+          node tests/test_card.cjs
+
       - name: Validate repository files
         shell: bash
         run: |
@@ -99,7 +107,7 @@ jobs:
           yaml.safe_load((root / "services.yaml").read_text(encoding="utf-8"))
 
           hacs = json.loads(Path("hacs.json").read_text(encoding="utf-8"))
-          expected_hacs = {"name": "Youtube DLP", "render_readme": True}
+          expected_hacs = {"name": "YouTube-DLP", "homeassistant": "2026.11.0"}
           if hacs != expected_hacs:
               raise SystemExit(f"Unexpected hacs.json content: {hacs!r}")
 
